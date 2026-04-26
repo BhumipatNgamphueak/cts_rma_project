@@ -1,24 +1,24 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers.
-# All rights reserved.
-#
-# SPDX-License-Identifier: BSD-3-Clause
-
+# tasks/one_leg/rma/agents/rsl_rl_ppo_cfg.py
 from isaaclab.utils import configclass
-
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import (  # type: ignore
+    RslRlOnPolicyRunnerCfg,
+    RslRlPpoActorCriticCfg,
+    RslRlPpoAlgorithmCfg,
+)
 
 
 @configclass
-class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    num_steps_per_env = 16
-    max_iterations = 150
-    save_interval = 50
-    experiment_name = "cartpole_direct"
+class OneLegRMAPPOCfg(RslRlOnPolicyRunnerCfg):
+    num_steps_per_env       = 24
+    max_iterations          = 3000
+    save_interval           = 200
+    experiment_name         = "one_leg_rma"
     empirical_normalization = False
+
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
-        actor_hidden_dims=[32, 32],
-        critic_hidden_dims=[32, 32],
+        actor_hidden_dims=[256, 128, 64],   # same as Baseline
+        critic_hidden_dims=[256, 128, 64],  # critic input is 22-D (handled internally)
         activation="elu",
     )
     algorithm = RslRlPpoAlgorithmCfg(

@@ -87,37 +87,47 @@ class SharedCommandsCfg:
 
 
 ###############################################################################
-# Rewards  (shared across all three methods)
+# Rewards  (shared across all three methods — tuned for UNITREE GO2)
+# Reference: Isaac Lab UnitreeGo2RoughEnvCfg (rough_env_cfg.py)
 ###############################################################################
 @configclass
 class SharedRewardsCfg:
     # ── Primary: command tracking ───────────────────────────────────────────
+    # std = sqrt(0.25) ≈ 0.5 matches Isaac Lab official GO2 config.
+    # Using std=0.25 gives exp(-err/0.0625) ≈ 0 for any error > 0.1 m/s.
     track_lin_vel = RewardTermCfg(
-        func=shared_mdp.track_lin_vel_xy_exp,
+        func=mdp.track_lin_vel_xy_exp,
         weight=1.5,
-        params={"std": 0.25},
+        params={"std": math.sqrt(0.25), "command_name": "base_velocity"},
     )
     track_ang_vel = RewardTermCfg(
-        func=shared_mdp.track_ang_vel_z_exp,
+        func=mdp.track_ang_vel_z_exp,
         weight=0.75,
-        params={"std": 0.25},
+        params={"std": math.sqrt(0.25), "command_name": "base_velocity"},
     )
     # ── Stability ───────────────────────────────────────────────────────────
-    penalize_ang_vel_xy = RewardTermCfg(
-        func=shared_mdp.penalize_ang_vel_xy, weight=-0.05
-    )
-    penalize_z_vel = RewardTermCfg(
-        func=shared_mdp.penalize_lin_vel_z, weight=-2.0
-    )
-    # ── Smoothness  (r_smooth in paper) ────────────────────────────────────
-    penalize_action_rate = RewardTermCfg(func=mdp.action_rate_l2, weight=-0.01)
-    # ── Torque cost  (r_torque in paper) ───────────────────────────────────
-    penalize_joint_torque = RewardTermCfg(func=mdp.joint_torques_l2, weight=-2e-4)
-    # ── Contact quality ─────────────────────────────────────────────────────
-    penalize_foot_slip = RewardTermCfg(
-        func=shared_mdp.penalize_foot_slip,
-        weight=-0.2,
-        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot")},
+    penalize_ang_vel_xy = RewardTermCfg(func=mdp.ang_vel_xy_l2, weight=-0.05)
+    penalize_z_vel      = RewardTermCfg(func=mdp.lin_vel_z_l2,  weight=-2.0)
+    # ── Smoothness ──────────────────────────────────────────────────────────
+    penalize_action_rate = RewardTermCfg(func=mdp.action_rate_l2,   weight=-0.01)
+    penalize_joint_acc   = RewardTermCfg(func=mdp.joint_acc_l2,     weight=-2.5e-7)
+    # ── Torque cost ─────────────────────────────────────────────────────────
+    # Isaac Lab GO2 flat-env reference: -1e-5  (our old -2e-4 was 20× too strong)
+    penalize_joint_torque = RewardTermCfg(func=mdp.joint_torques_l2, weight=-1e-5)
+    # ── Survival ────────────────────────────────────────────────────────────
+    alive = RewardTermCfg(func=mdp.is_alive, weight=1.0)
+    termination_penalty = RewardTermCfg(func=mdp.is_terminated, weight=-10.0)
+    # ── Gait quality ────────────────────────────────────────────────────────
+    # Rewards feet spending time in the air → robot learns to lift and step.
+    # Isaac Lab GO2 flat-env reference: weight=0.25, threshold=0.5s.
+    feet_air_time = RewardTermCfg(
+        func=shared_mdp.feet_air_time,
+        weight=0.25,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
+            "command_name": "base_velocity",
+            "threshold": 0.5,
+        },
     )
 
 

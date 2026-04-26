@@ -10,13 +10,12 @@
 ##
 
 from isaaclab_tasks.utils import import_packages
-# source/cts_rma_project/cts_rma_project/tasks/__init__.py
-from .shared   import *   # noqa
-from .baseline import *   # noqa
-from .rma      import *   # noqa
-from .cts      import *   # noqa
 
-# The blacklist is used to prevent importing configs from sub-packages
+from .shared   import *   # noqa  — GO2 shared rewards/obs
+from .baseline import *   # noqa  — GO2 baseline
+from .rma      import *   # noqa  — GO2 RMA
+from .cts      import *   # noqa  — GO2 CTS
+from .one_leg  import *   # noqa  — one-leg hopper
+
 _BLACKLIST_PKGS = ["utils", ".mdp"]
-# Import all configs in this package
 import_packages(__name__, _BLACKLIST_PKGS)

@@ -35,30 +35,26 @@ def proprioceptive_obs_go2(
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
 ) -> torch.Tensor:
     """
-    o_t ∈ R^30 — runtime-only proprioceptive state for GO2.
+    o_t ∈ R^37 — runtime-only proprioceptive state for GO2.
 
-    joint_pos_rel (12) + joint_vel (12) + roll_pitch (2) + foot_contact (4) = 30
+    joint_pos_rel(12) + joint_vel(12) + ang_vel_b(3) + gravity_b(3)
+    + vel_cmd(3) + foot_contact(4) = 37
 
     sensor_cfg should have body_names=".*_foot" so body_ids resolves to the 4 feet.
     """
     asset = env.scene[asset_cfg.name]
     contact = env.scene[sensor_cfg.name]
 
-    joint_pos = asset.data.joint_pos - asset.data.default_joint_pos   # [N, 12]
-    joint_vel = asset.data.joint_vel                                   # [N, 12]
-
-    grav_b = asset.data.projected_gravity_b                            # [N, 3]
-    roll  = torch.atan2(grav_b[:, 1], grav_b[:, 2]).unsqueeze(1)
-    pitch = torch.atan2(
-        -grav_b[:, 0],
-        torch.sqrt(grav_b[:, 1] ** 2 + grav_b[:, 2] ** 2)
-    ).unsqueeze(1)
-
+    joint_pos    = asset.data.joint_pos - asset.data.default_joint_pos   # [N, 12]
+    joint_vel    = asset.data.joint_vel                                   # [N, 12]
+    ang_vel_b    = asset.data.root_ang_vel_b                              # [N, 3]
+    gravity_b    = asset.data.projected_gravity_b                         # [N, 3]
+    vel_cmd      = env.command_manager.get_command("base_velocity")[:, :3]  # [N, 3]
     foot_contact = (
         contact.data.net_forces_w_history[:, 0, sensor_cfg.body_ids, 2] > 1.0
-    ).float()                                                          # [N, 4]
+    ).float()                                                             # [N, 4]
 
-    return torch.cat([joint_pos, joint_vel, roll, pitch, foot_contact], dim=-1)
+    return torch.cat([joint_pos, joint_vel, ang_vel_b, gravity_b, vel_cmd, foot_contact], dim=-1)
 
 
 # ── Privileged — Internal ─────────────────────────────────────────────────────
@@ -119,14 +115,32 @@ def privileged_external_go2(
         contact.data.net_forces_w_history[:, 0, sensor_cfg.body_ids, 2] > 1.0
     ).float()                                                                   # [N, 4]
 
-    # Average applied torque per joint type (hip=joints 0,3,6,9; thigh=1,4,7,10; calf=2,5,8,11)
+    # Average applied torque per joint type — GO2 ordering: hips 0-3, thighs 4-7, calfs 8-11
     torques = asset.data.applied_torque                                          # [N, 12]
-    tau_hip   = torques[:, [0, 3, 6, 9]].abs().mean(dim=1, keepdim=True)
-    tau_thigh = torques[:, [1, 4, 7, 10]].abs().mean(dim=1, keepdim=True)
-    tau_calf  = torques[:, [2, 5, 8, 11]].abs().mean(dim=1, keepdim=True)
+    tau_hip   = torques[:, 0:4].abs().mean(dim=1, keepdim=True)
+    tau_thigh = torques[:, 4:8].abs().mean(dim=1, keepdim=True)
+    tau_calf  = torques[:, 8:12].abs().mean(dim=1, keepdim=True)
     tau_avg   = torch.cat([tau_hip, tau_thigh, tau_calf], dim=-1)               # [N, 3]
 
     return torch.cat([f_contact_sum, c_bin, tau_avg], dim=-1)   # [N, 10]
+
+
+# ── RMA asymmetric critic: o_t ⊕ x_t ────────────────────────────────────────
+
+def combined_obs_rma(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+) -> torch.Tensor:
+    """
+    RMA asymmetric critic input: o_t (37) ⊕ x_t (24) = 61D.
+    The actor sees only o_t; the critic sees full state for better value estimates.
+    sensor_cfg should have body_names=".*_foot".
+    """
+    return torch.cat([
+        proprioceptive_obs_go2(env, asset_cfg=asset_cfg, sensor_cfg=sensor_cfg),
+        privileged_full_go2(env, asset_cfg=asset_cfg, sensor_cfg=sensor_cfg),
+    ], dim=-1)
 
 
 # ── Privileged — Full (Internal ∪ External) ───────────────────────────────────

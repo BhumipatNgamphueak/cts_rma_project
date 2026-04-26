@@ -3,13 +3,10 @@ from .observations import (
     privileged_internal_go2,
     privileged_external_go2,
     privileged_full_go2,
+    combined_obs_rma,
 )
 from .rewards import (
-    track_lin_vel_xy_exp,
-    track_ang_vel_z_exp,
-    penalize_ang_vel_xy,
-    penalize_lin_vel_z,
-    penalize_foot_slip,
+    feet_air_time,
 )
 from .events import (
     randomize_material_and_track,

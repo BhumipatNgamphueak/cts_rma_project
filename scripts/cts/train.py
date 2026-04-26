@@ -1,21 +1,19 @@
 """
-CTS (Curriculum Training System) training script.
+CTS (Concurrent Teacher-Student) training script.
 
-Single-phase PPO training with an automatic velocity-command curriculum.
-The CTSRunner advances or decays the curriculum level every 50 iterations
-based on the agent's mean episode reward:
-  - reward > 0.75  → level increases (harder velocity commands)
-  - reward < 0.35  → level decreases (easier velocity commands)
+Standard single-phase PPO — no curriculum.  The CTS contribution is the
+concurrent teacher-student training mechanism, not command scheduling.
+Command ranges are identical to Baseline and RMA (fair comparison).
 
 Usage:
-    ./isaaclab.sh -p scripts/cts/train.py \
-        --num_envs 4096 --max_iterations 3000 \
+    python scripts/cts/train.py \
+        --num_envs 4096 --max_iterations 5000 \
         --experiment cts_go2 --device cuda:0
 
     # Resume from checkpoint
-    ./isaaclab.sh -p scripts/cts/train.py \
+    python scripts/cts/train.py \
         --checkpoint logs/cts/<run>/model_final.pt \
-        --max_iterations 3000
+        --max_iterations 5000
 """
 
 import argparse
@@ -25,7 +23,7 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="CTS training")
 parser.add_argument("--num_envs",       type=int,   default=4096)
-parser.add_argument("--max_iterations", type=int,   default=3000)
+parser.add_argument("--max_iterations", type=int,   default=5000)
 parser.add_argument("--experiment",     type=str,   default="cts_go2")
 parser.add_argument("--seed",           type=int,   default=42)
 parser.add_argument("--checkpoint",     type=str,   default=None,
@@ -44,11 +42,11 @@ import gymnasium as gym
 from datetime import datetime
 
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper  # type: ignore
+from rsl_rl.runners import OnPolicyRunner           # type: ignore
 
 import cts_rma_project.tasks  # noqa: F401
 from cts_rma_project.tasks.cts.cts_env_cfg          import CTSEnvCfg
 from cts_rma_project.tasks.cts.agents.rsl_rl_ppo_cfg import CTSPPORunnerCfg
-from cts_rma_project.tasks.cts.cts_runner            import CTSRunner
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32       = True
@@ -80,7 +78,7 @@ def main():
     )
     os.makedirs(log_dir, exist_ok=True)
 
-    runner = CTSRunner(env, runner_cfg.to_dict(), log_dir=log_dir, device=device)
+    runner = OnPolicyRunner(env, runner_cfg.to_dict(), log_dir=log_dir, device=device)
 
     if args_cli.checkpoint:
         runner.load(args_cli.checkpoint)

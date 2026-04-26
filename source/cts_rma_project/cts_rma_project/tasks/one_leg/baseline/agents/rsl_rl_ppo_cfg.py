@@ -1,4 +1,4 @@
-# tasks/rma/agents/rsl_rl_ppo_cfg.py
+# tasks/one_leg/baseline/agents/rsl_rl_ppo_cfg.py
 from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl import (  # type: ignore
     RslRlOnPolicyRunnerCfg,
@@ -8,22 +8,17 @@ from isaaclab_rl.rsl_rl import (  # type: ignore
 
 
 @configclass
-class RMAPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    """PPO runner config for RMA Phase 1 training.
-
-    Phase 1: trains base policy π and environment-factor encoder μ
-    using ground-truth privileged observations e_t.
-    """
-    num_steps_per_env        = 24     # same as Baseline and CTS
-    max_iterations           = 5000
-    save_interval            = 200
-    experiment_name          = "rma_go2"
-    empirical_normalization  = False
+class OneLegBaselinePPOCfg(RslRlOnPolicyRunnerCfg):
+    num_steps_per_env       = 24
+    max_iterations          = 3000
+    save_interval           = 200
+    experiment_name         = "one_leg_baseline"
+    empirical_normalization = False
 
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
-        actor_hidden_dims=[512, 256, 128],   # same as Baseline
-        critic_hidden_dims=[512, 256, 128],
+        actor_hidden_dims=[256, 128, 64],
+        critic_hidden_dims=[256, 128, 64],
         activation="elu",
     )
     algorithm = RslRlPpoAlgorithmCfg(

@@ -46,7 +46,7 @@ class BaselineEnvCfg(SharedEnvCfg):
 
     def __post_init__(self):
         super().__post_init__()
-        self.observation_space = 30   # proprioceptive only
+        self.observation_space = 37   # proprioceptive + ang_vel + gravity + vel_cmd
 
 
 @configclass

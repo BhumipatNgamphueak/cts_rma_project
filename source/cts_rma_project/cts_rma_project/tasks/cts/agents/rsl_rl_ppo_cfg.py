@@ -14,23 +14,23 @@ class CTSPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     Tuned for a 37-D observation space and 50 Hz policy.
     CTSRunner wraps this config and adds curriculum logic on top.
     """
-    num_steps_per_env   = 24
-    max_iterations      = 3000
-    save_interval       = 200
-    experiment_name     = "cts_go2"
-    empirical_normalization = False
+    num_steps_per_env        = 24
+    max_iterations           = 5000   # same as Baseline and RMA
+    save_interval            = 200
+    experiment_name          = "cts_go2"
+    empirical_normalization  = False
 
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
-        actor_hidden_dims=[256, 128, 64],
-        critic_hidden_dims=[256, 128, 64],
+        actor_hidden_dims=[512, 256, 128],   # same as Baseline
+        critic_hidden_dims=[512, 256, 128],
         activation="elu",
     )
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.01,
+        entropy_coef=0.005,   # same as Baseline
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=1.0e-3,
