@@ -1,0 +1,108 @@
+"""
+RMA Phase 2 training script.
+
+Trains the adaptation module φ via supervised learning.  φ learns to map
+a 0.5 s history of (state, action) pairs to the latent code ẑ_t that
+approximates z_t = μ(e_t) produced by the frozen Phase 1 encoder.
+
+A Phase 1 checkpoint must be supplied via --checkpoint.
+
+Usage:
+    ./isaaclab.sh -p scripts/rma/train_phase2.py \
+        --checkpoint logs/rma/phase1/<run>/model_final.pt \
+        --num_envs 4096 --num_iterations 1000 --device cuda:0
+"""
+
+import argparse
+import sys
+
+from isaaclab.app import AppLauncher
+
+parser = argparse.ArgumentParser(description="RMA Phase 2 training")
+parser.add_argument("--checkpoint",     type=str,   required=True,
+                    help="Path to the Phase 1 model checkpoint (.pt)")
+parser.add_argument("--num_envs",       type=int,   default=4096)
+parser.add_argument("--num_iterations", type=int,   default=1000)
+parser.add_argument("--history_len",    type=int,   default=50,
+                    help="Number of (state, action) timesteps fed to φ")
+parser.add_argument("--batch_size",     type=int,   default=80000)
+parser.add_argument("--lr",             type=float, default=5e-4)
+parser.add_argument("--seed",           type=int,   default=42)
+AppLauncher.add_app_launcher_args(parser)
+args_cli, hydra_args = parser.parse_known_args()
+sys.argv = [sys.argv[0]] + hydra_args
+
+app_launcher = AppLauncher(args_cli)
+simulation_app = app_launcher.app
+
+# ── imports that require Isaac Sim to be running ──────────────────────────
+import os
+import torch
+import gymnasium as gym
+from datetime import datetime
+
+from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper  # type: ignore
+
+import cts_rma_project.tasks  # noqa: F401
+from cts_rma_project.tasks.rma.rma_env_cfg import RMAEnvCfg
+from cts_rma_project.tasks.rma.rma_network import RMAActorCritic
+from cts_rma_project.tasks.rma.rma_runner  import RMAPhase2Runner
+
+
+def main():
+    device = args_cli.device or "cuda"
+
+    # ── environment ─────────────────────────────────────────────────────
+    env_cfg = RMAEnvCfg()
+    env_cfg.scene.num_envs = args_cli.num_envs
+    env_cfg.sim.device     = device
+    env_cfg.seed           = args_cli.seed
+
+    env = gym.make("Template-RMA-GO2-v0", cfg=env_cfg)
+    env = RslRlVecEnvWrapper(env)
+
+    # ── load Phase 1 model ───────────────────────────────────────────────
+    obs_dim = env.observation_space.shape[0]
+    act_dim = env.action_space.shape[0]
+
+    rma_model = RMAActorCritic(
+        num_actor_obs=obs_dim,
+        num_critic_obs=obs_dim,
+        num_actions=act_dim,
+        env_factor_dim=17,
+        latent_dim=8,
+    ).to(device)
+
+    checkpoint = torch.load(args_cli.checkpoint, map_location=device)
+    # RSL-RL saves actor_critic state inside the checkpoint dict
+    state_dict = checkpoint.get("model_state_dict",
+                  checkpoint.get("actor_critic", checkpoint))
+    rma_model.load_state_dict(state_dict, strict=False)
+    print(f"[INFO] Loaded Phase 1 weights from: {args_cli.checkpoint}")
+
+    # ── Phase 2 runner ───────────────────────────────────────────────────
+    log_dir = os.path.join(
+        "logs", "rma", "phase2",
+        datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    )
+
+    phase2_runner = RMAPhase2Runner(
+        env=env.unwrapped,
+        rma_model=rma_model,
+        history_len=args_cli.history_len,
+        num_iterations=args_cli.num_iterations,
+        batch_size=args_cli.batch_size,
+        learning_rate=args_cli.lr,
+        log_dir=log_dir,
+        device=device,
+    )
+
+    phase2_runner.collect_and_train()
+    print(f"[INFO] Phase 2 complete. Adaptation module saved to: {log_dir}/")
+
+    env.close()
+
+
+if __name__ == "__main__":
+    main()
+    simulation_app.close()

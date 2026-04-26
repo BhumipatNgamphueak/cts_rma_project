@@ -10,6 +10,9 @@
 ##
 
 from isaaclab_tasks.utils import import_packages
+# source/cts_rma_project/cts_rma_project/tasks/__init__.py
+from .rma import *   # noqa
+from .cts import *   # noqa
 
 # The blacklist is used to prevent importing configs from sub-packages
 _BLACKLIST_PKGS = ["utils", ".mdp"]
