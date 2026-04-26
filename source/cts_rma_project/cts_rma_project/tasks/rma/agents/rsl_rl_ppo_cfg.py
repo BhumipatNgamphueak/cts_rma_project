@@ -16,7 +16,7 @@ class RMAPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """
     num_steps_per_env   = 16
     max_iterations      = 5000
-    save_interval       = 500
+    save_interval       = 200
     experiment_name     = "rma_phase1"
     empirical_normalization = False
 

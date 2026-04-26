@@ -8,6 +8,7 @@ from isaaclab.managers import SceneEntityCfg
 def base_state_cts(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
 ) -> torch.Tensor:
     """
     CTS proprioceptive state: 37D
@@ -18,7 +19,7 @@ def base_state_cts(
     so the policy can close the loop without a separate encoder.
     """
     asset = env.scene[asset_cfg.name]
-    contact_sensor = env.scene["contact_forces"]
+    contact_sensor = env.scene[sensor_cfg.name]
 
     # Joint positions relative to default standing pose
     joint_pos = asset.data.joint_pos - asset.data.default_joint_pos  # [N, 12]
@@ -33,7 +34,7 @@ def base_state_cts(
 
     # Binary foot contact (4 feet); threshold = 1 N
     foot_contact = (
-        contact_sensor.data.net_forces_w_history[:, 0, :, 2] > 1.0
+        contact_sensor.data.net_forces_w_history[:, 0, sensor_cfg.body_ids, 2] > 1.0
     ).float()  # [N, 4]
 
     return torch.cat(

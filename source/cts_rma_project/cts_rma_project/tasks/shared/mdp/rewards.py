@@ -64,8 +64,6 @@ def penalize_foot_slip(
     """−Σ contact_i × |calf_vel_i| — penalise foot sliding during stance."""
     asset   = env.scene[asset_cfg.name]
     contact = env.scene[sensor_cfg.name]
-    in_contact = contact.data.net_forces_w_history[:, 0, :, 2] > 1.0   # [N, 4]
-    calf_speed = torch.norm(
-        asset.data.joint_vel[:, [2, 5, 8, 11]], dim=-1, keepdim=True
-    )                                                                    # [N, 1]
-    return torch.sum(in_contact.float() * calf_speed.squeeze(-1), dim=1)
+    in_contact = contact.data.net_forces_w_history[:, 0, sensor_cfg.body_ids, 2] > 1.0  # [N, 4]
+    calf_speed = asset.data.joint_vel[:, [2, 5, 8, 11]].abs()           # [N, 4]
+    return torch.sum(in_contact.float() * calf_speed, dim=1)

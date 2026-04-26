@@ -11,7 +11,7 @@ Adds only a 'policy' observation group with the 30-D proprioceptive state:
 This serves as the experimental control against RMA and CTS.
 """
 from __future__ import annotations
-from isaaclab.managers import ObservationGroupCfg, ObservationTermCfg
+from isaaclab.managers import ObservationGroupCfg, ObservationTermCfg, SceneEntityCfg
 from isaaclab.utils import configclass
 
 from ..shared.shared_env_cfg import SharedEnvCfg
@@ -26,7 +26,10 @@ class BaselineObsCfg:
     @configclass
     class PolicyCfg(ObservationGroupCfg):
         """o_t ∈ R^30 — runtime-only proprioceptive state."""
-        state = ObservationTermCfg(func=shared_mdp.proprioceptive_obs_go2)
+        state = ObservationTermCfg(
+            func=shared_mdp.proprioceptive_obs_go2,
+            params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot")},
+        )
         enable_corruption = True
         concatenate_terms = True
 

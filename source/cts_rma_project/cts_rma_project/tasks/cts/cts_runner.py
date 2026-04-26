@@ -26,8 +26,6 @@ from collections import deque
 
 from rsl_rl.runners import OnPolicyRunner  # type: ignore
 
-from .cts_network import CTSActorCritic
-
 # ── Curriculum hyper-parameters ──────────────────────────────────────────────
 CMD_VEL_START      = 0.5    # m/s  at curriculum level 0
 CMD_VEL_FINAL      = 1.5    # m/s  at curriculum level 1
@@ -59,26 +57,10 @@ class CTSRunner:
         log_dir: str | None = None,
         device: str = "cuda",
     ):
-        # Inject our custom actor-critic class so the runner uses it
-        train_cfg = dict(train_cfg)
-        train_cfg.setdefault("policy", {})["class_name"] = "CTSActorCritic"
-
         self._inner = OnPolicyRunner(env, train_cfg, log_dir=log_dir, device=device)
         self.env     = env
         self.device  = device
         self.log_dir = log_dir or "logs/cts"
-
-        # Replace the inner runner's actor-critic with our custom one
-        obs_shape  = env.observation_space.shape
-        act_shape  = env.action_space.shape
-        num_obs    = obs_shape[0] if obs_shape else train_cfg.get("num_observations", 37)
-        num_act    = act_shape[0] if act_shape else train_cfg.get("num_actions", 12)
-
-        self._inner.alg.actor_critic = CTSActorCritic(
-            num_actor_obs=num_obs,
-            num_critic_obs=num_obs,
-            num_actions=num_act,
-        ).to(device)
 
         # Curriculum state
         self.curriculum_level: float = 0.0
@@ -149,10 +131,8 @@ class CTSRunner:
         vel_max = self._current_vel_max()
         lat_max = vel_max * CMD_VEL_LAT_RATIO
         try:
-            # Unwrap the vec-env to reach the raw ManagerBasedRLEnv
-            raw_env = self.env
-            while hasattr(raw_env, "unwrapped"):
-                raw_env = raw_env.unwrapped
+            # gymnasium Env.unwrapped already traverses the full wrapper chain
+            raw_env = self.env.unwrapped
             cmd_term = raw_env.command_manager._terms["base_velocity"]
             cmd_term.cfg.ranges.lin_vel_x = (-vel_max, vel_max)
             cmd_term.cfg.ranges.lin_vel_y = (-lat_max, lat_max)

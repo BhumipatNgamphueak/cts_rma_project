@@ -70,8 +70,8 @@ def main():
                              device=env_cfg.sim.device)
 
     # Swap in the custom RMA actor-critic
-    obs_dim = env.observation_space.shape[0]
-    act_dim = env.action_space.shape[0]
+    obs_dim = env.num_obs
+    act_dim = env.num_actions
     runner.alg.actor_critic = RMAActorCritic(
         num_actor_obs=obs_dim,
         num_critic_obs=obs_dim,

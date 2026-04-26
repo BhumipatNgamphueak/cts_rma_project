@@ -32,14 +32,17 @@ from isaaclab.managers import SceneEntityCfg
 def proprioceptive_obs_go2(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
 ) -> torch.Tensor:
     """
     o_t ∈ R^30 — runtime-only proprioceptive state for GO2.
 
     joint_pos_rel (12) + joint_vel (12) + roll_pitch (2) + foot_contact (4) = 30
+
+    sensor_cfg should have body_names=".*_foot" so body_ids resolves to the 4 feet.
     """
     asset = env.scene[asset_cfg.name]
-    contact = env.scene["contact_forces"]
+    contact = env.scene[sensor_cfg.name]
 
     joint_pos = asset.data.joint_pos - asset.data.default_joint_pos   # [N, 12]
     joint_vel = asset.data.joint_vel                                   # [N, 12]
@@ -52,7 +55,7 @@ def proprioceptive_obs_go2(
     ).unsqueeze(1)
 
     foot_contact = (
-        contact.data.net_forces_w_history[:, 0, :, 2] > 1.0
+        contact.data.net_forces_w_history[:, 0, sensor_cfg.body_ids, 2] > 1.0
     ).float()                                                          # [N, 4]
 
     return torch.cat([joint_pos, joint_vel, roll, pitch, foot_contact], dim=-1)
@@ -102,16 +105,18 @@ def privileged_external_go2(
     x^ext ∈ R^10 — timestep-varying interaction signals.
 
     f_contact_sum (3) + c_bin (4) + τ_avg_per_type (3) = 10
+
+    sensor_cfg should have body_names=".*_foot" so body_ids resolves to the 4 feet.
     """
     asset = env.scene[asset_cfg.name]
     contact = env.scene[sensor_cfg.name]
 
     # Sum of net contact force vectors across all four feet [N, 4, 3] → [N, 3]
-    f_contact_sum = contact.data.net_forces_w_history[:, 0, :, :].sum(dim=1)  # [N, 3]
+    f_contact_sum = contact.data.net_forces_w_history[:, 0, sensor_cfg.body_ids, :].sum(dim=1)  # [N, 3]
 
     # Per-foot binary contact flag (more precise than proprioceptive obs)
     c_bin = (
-        contact.data.net_forces_w_history[:, 0, :, 2] > 1.0
+        contact.data.net_forces_w_history[:, 0, sensor_cfg.body_ids, 2] > 1.0
     ).float()                                                                   # [N, 4]
 
     # Average applied torque per joint type (hip=joints 0,3,6,9; thigh=1,4,7,10; calf=2,5,8,11)

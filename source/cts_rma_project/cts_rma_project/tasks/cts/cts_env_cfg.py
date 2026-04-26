@@ -27,7 +27,7 @@ from isaaclab.managers import (
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
-from isaaclab_assets.robots.unitree import GO2_CFG  # type: ignore
+from isaaclab_assets.robots.unitree import UNITREE_GO2_CFG  # type: ignore
 
 from . import mdp as cts_mdp
 
@@ -42,9 +42,9 @@ class CTSSceneCfg(InteractiveSceneCfg):
         prim_path="/World/skyLight",
         spawn=sim_utils.DomeLightCfg(intensity=750.0, color=(0.9, 0.9, 0.9)),
     )
-    robot: ArticulationCfg = GO2_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+    robot: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
     contact_forces = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/.*foot",
+        prim_path="{ENV_REGEX_NS}/Robot/.*",
         history_length=3,
         track_air_time=True,
     )
@@ -59,7 +59,10 @@ class CTSObsCfg:
     class PolicyCfg(ObservationGroupCfg):
         """x_t = joint_pos_rel(12) + joint_vel(12) + ang_vel_b(3)
                 + gravity_b(3) + vel_cmd(3) + foot_contact(4) = 37D"""
-        state = ObservationTermCfg(func=cts_mdp.base_state_cts)
+        state = ObservationTermCfg(
+            func=cts_mdp.base_state_cts,
+            params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot")},
+        )
         enable_corruption = True
         concatenate_terms = True
 
@@ -122,7 +125,7 @@ class CTSRewardsCfg:
     penalize_foot_slip = RewardTermCfg(
         func=cts_mdp.penalize_foot_slip,
         weight=-0.5,
-        params={"sensor_cfg": SceneEntityCfg("contact_forces")},
+        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot")},
     )
     # Joint limit safety
     penalize_joint_limits = RewardTermCfg(
@@ -145,7 +148,7 @@ class CTSTerminationsCfg:
         },
     )
     base_height = TerminationTermCfg(
-        func=mdp.base_height_below,
+        func=mdp.root_height_below_minimum,
         params={"minimum_height": 0.28},
     )
 

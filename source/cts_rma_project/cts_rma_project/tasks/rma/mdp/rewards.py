@@ -62,8 +62,6 @@ def penalize_foot_slip(env: ManagerBasedRLEnv,
     asset = env.scene[asset_cfg.name]
     contact_sensor = env.scene[sensor_cfg.name]
     # Binary foot contact: True if contact force > threshold
-    contact = contact_sensor.data.net_forces_w_history[:, 0, :, 2] > 1.0  # [N, 4]
-    # Foot velocities (approximate from body velocity — proper impl needs foot frames)
-    # Using joint vel proxy for now; replace with actual foot frame velocities if available
-    foot_vel = torch.norm(asset.data.joint_vel[:, [2, 5, 8, 11]], dim=-1, keepdim=True)  # calf joints
-    return torch.sum(contact.float() * foot_vel.squeeze(-1), dim=1)
+    contact = contact_sensor.data.net_forces_w_history[:, 0, sensor_cfg.body_ids, 2] > 1.0  # [N, 4]
+    foot_vel = asset.data.joint_vel[:, [2, 5, 8, 11]].abs()  # [N, 4] per-foot calf speed
+    return torch.sum(contact.float() * foot_vel, dim=1)

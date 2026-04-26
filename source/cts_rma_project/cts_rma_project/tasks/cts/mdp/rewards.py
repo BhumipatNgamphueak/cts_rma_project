@@ -41,14 +41,9 @@ def penalize_foot_slip(
     contact_sensor = env.scene[sensor_cfg.name]
 
     # Binary contact flag per foot
-    in_contact = contact_sensor.data.net_forces_w_history[:, 0, :, 2] > 1.0  # [N, 4]
-
-    # Proxy foot speed via calf-joint velocity (joints 2, 5, 8, 11 on GO2)
-    foot_speed = torch.norm(
-        asset.data.joint_vel[:, [2, 5, 8, 11]], dim=-1, keepdim=True
-    )  # [N, 1]
-
-    return torch.sum(in_contact.float() * foot_speed.squeeze(-1), dim=1)
+    in_contact = contact_sensor.data.net_forces_w_history[:, 0, sensor_cfg.body_ids, 2] > 1.0  # [N, 4]
+    foot_speed = asset.data.joint_vel[:, [2, 5, 8, 11]].abs()  # [N, 4] per-foot calf speed
+    return torch.sum(in_contact.float() * foot_speed, dim=1)
 
 
 def penalize_joint_limits(

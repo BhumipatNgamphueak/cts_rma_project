@@ -11,12 +11,12 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 from collections import deque
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunner  # type: ignore
+from rsl_rl.runners import OnPolicyRunner  # type: ignore
 
 from .rma_network import RMAActorCritic, AdaptationModule
 
 
-class RMAPhase1Runner(RslRlOnPolicyRunner):
+class RMAPhase1Runner(OnPolicyRunner):
     """
     Phase 1: extend RSL-RL runner to pass privileged_obs to actor.
     The env must provide obs_dict["privileged"] = e_t.

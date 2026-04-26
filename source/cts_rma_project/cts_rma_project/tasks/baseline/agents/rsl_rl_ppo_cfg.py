@@ -19,7 +19,7 @@ from isaaclab_rl.rsl_rl import (  # type: ignore
 class BaselinePPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env        = 24
     max_iterations           = 5000
-    save_interval            = 500
+    save_interval            = 200
     experiment_name          = "baseline_go2"
     empirical_normalization  = False
 
