@@ -4,30 +4,20 @@ from ..baseline.one_leg_env_cfg import OneLegEnvCfg, OneLegEnvCfg_PLAY
 
 
 @configclass
-class OneLegCTSTeacherEnvCfg(OneLegEnvCfg):
-    """CTS teacher — policy sees 22-D (14 prop + 8 privileged)."""
-    observation_space: int = 22
+class OneLegCTSEnvCfg(OneLegEnvCfg):
+    """CTS concurrent env.
+
+    policy obs  = 76D: [unified(75), is_teacher_flag(1)]
+    critic obs  = 39D: [ot, xt] for all envs (privileged critic + L_rec target)
+    """
+    observation_space: int = 76   # 75D unified + 1D flag
+    state_space:       int = 48   # [ot(15), xt(33)] for asymmetric critic
+
+    teacher_ratio: float = 0.75
 
 
 @configclass
-class OneLegCTSTeacherEnvCfg_PLAY(OneLegEnvCfg_PLAY):
-    observation_space: int = 22
-
-
-@configclass
-class OneLegCTSStudentEnvCfg(OneLegEnvCfg):
-    """CTS student — policy sees 14-D; teacher imitation reward decays."""
-    observation_space: int = 14
-
-    # Imitation reward weight: decays from alpha_start → alpha_end
-    imitation_alpha_start: float = 1.0
-    imitation_alpha_end:   float = 0.1
-    imitation_decay_iters: int   = 1000   # iterations over which alpha decays
-
-
-@configclass
-class OneLegCTSStudentEnvCfg_PLAY(OneLegEnvCfg_PLAY):
-    observation_space: int = 14
-    imitation_alpha_start: float = 0.0
-    imitation_alpha_end:   float = 0.0
-    imitation_decay_iters: int   = 1
+class OneLegCTSEnvCfg_PLAY(OneLegEnvCfg_PLAY):
+    observation_space: int = 76
+    state_space:       int = 39
+    teacher_ratio: float   = 0.0   # deploy student encoder only

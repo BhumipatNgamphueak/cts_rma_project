@@ -1,99 +1,78 @@
 # tasks/one_leg/rma/one_leg_rma_env.py
 """
-One-legged hopper — RMA environment (Phase 1: asymmetric actor-critic).
+One-legged hopper — RMA Phase-1 environment (paper Section 4.2).
 
-Actor  sees: 14-D proprioceptive obs (identical to Baseline at deployment)
-Critic sees: 14-D + 8-D privileged = 22-D (sim-only training signal)
+Extends OneLegBaselineEnv (which already applies full Table 4 DR).
+Adds privileged obs xt ∈ R^33 for actor + critic:
 
-Privileged obs (8-D):
-    stiffness_scale(1)  — actuator Kp scale drawn at episode reset
-    damping_scale(1)    — actuator Kd scale
-    exact_contact(1)    — unsmoothed contact force magnitude
-    foot_vel_x(1)       — end-effector x-velocity (world frame)
-    foot_vel_z(1)       — end-effector z-velocity (lift quality)
-    body_vel_x(1)       — prismatic joint velocity (rail motion)
-    cycle_time_norm(1)  — normalised cycle time in [0,1] ((T-0.4)/0.6)
-    linear_joint_vel(1) — velocity of linear_left_right joint
+    xt = [External(13), Internal(20)]          ← paper Eq (2) ordering
 
-RSL-RL auto-builds an asymmetric ActorCritic when "critic" key is returned
-from _get_observations() with a different size than "policy".
+    External (13): fcontact(3) | cbin(1) | τt(3) | q̈t(3) | fpush(3)
+    Internal (20): µ(1) | erest(1) | Δm(4) | mpay(1) | ΔKp(3) | σms(3) | dact(1)
+                   ΔKd(3) | Δcom(3)
+
+Full actor+critic input: [ot(15), xt(33)] = 48D.
 """
 from __future__ import annotations
 import torch
-import isaaclab.envs.mdp as mdp
-from isaaclab.managers import SceneEntityCfg
 
 from ..baseline.one_leg_env import OneLegBaselineEnv
 from .one_leg_rma_env_cfg import OneLegRMAEnvCfg
 
-_NOMINAL_STIFFNESS = 20.0
-_NOMINAL_DAMPING   = 1.0
-_STIFFNESS_RANGE   = (0.8, 1.2)   # scale
-_DAMPING_RANGE     = (0.8, 1.2)
-
 
 class OneLegRMAEnv(OneLegBaselineEnv):
-    """RMA Phase-1: asymmetric actor-critic with privileged critic info."""
+    """RMA Phase-1: actor+critic see full [ot, xt] = 39D."""
 
     cfg: OneLegRMAEnvCfg
 
-    # ── Override: add privileged critic channel ───────────────────────────
+    # ══════════════════════════════════════════════════════════════════════
+    # Observations: prepend xt to baseline's 15D ot
+    # ══════════════════════════════════════════════════════════════════════
     def _get_observations(self) -> dict:
-        obs_dict   = super()._get_observations()
-        privileged = self._get_privileged_obs()
-        obs_dict["critic"] = torch.cat(
-            [obs_dict["policy"], privileged], dim=-1
-        )   # (N, 22)
-        return obs_dict
+        obs_dict = super()._get_observations()          # {"policy": (N, 15)}
+        xt       = self._build_privileged_obs()         # (N, 24)
+        full_obs = torch.cat([obs_dict["policy"], xt], dim=-1)   # (N, 39)
+        return {"policy": full_obs}
 
-    def _get_privileged_obs(self) -> torch.Tensor:
-        """8-D privileged obs — only available in simulation."""
-        # 1-2: actuator DR params (episode-constant)
-        stiffness_norm = (self.stiffness_scale - 1.0).unsqueeze(-1)   # (N,1)
-        damping_norm   = (self.damping_scale   - 1.0).unsqueeze(-1)   # (N,1)
+    def _build_privileged_obs(self) -> torch.Tensor:
+        """Build xt ∈ R^33 = [External(13), Internal(20)]  — full DR coverage."""
 
-        # 3: exact (unsmoothed) contact force
-        net_forces   = self.scene["contact_sensor"].data.net_forces_w
-        exact_force  = torch.norm(net_forces, dim=-1).squeeze(-1).unsqueeze(-1)  # (N,1)
+        # ── External 13D (timestep-varying signals) ───────────────────────
+        cf_vec     = self.scene["contact_sensor"].data.net_forces_w[:, 0, :] / 100.0  # (N, 3)
+        cf_flag    = self.is_foot_in_contact.float().unsqueeze(-1)                    # (N, 1)
+        torques    = self.robot.data.applied_torque[:, self.actuated_dof_indices] / 50.0  # (N, 3)
+        accels     = self.robot.data.joint_acc[:, self.actuated_dof_indices] / 50.0   # (N, 3)
+        push_f     = self.dr_push_force / max(self.cfg.push_force_max, 1e-6)          # (N, 3) ∈ [-1,1]
+        external   = torch.cat([cf_vec, cf_flag, torques, accels, push_f], dim=-1)   # (N, 13)
 
-        # 4-5: end-effector velocity (x, z)
-        ee_vel   = self.robot.data.body_lin_vel_w[:, self._ee_body_idx, :]  # (N,3)
-        foot_vx  = ee_vel[:, 0:1]   # x
-        foot_vz  = ee_vel[:, 2:3]   # z
+        # ── Internal 20D (episode-constant body parameters) ───────────────
+        fric       = self.dr_friction.unsqueeze(-1)                        # (N, 1)
+        rest       = self.dr_restitution.unsqueeze(-1)                     # (N, 1)
+        m_del      = self.dr_mass_scale - 1.0                              # (N, 4)
+        pyld       = self.dr_payload.unsqueeze(-1)                         # (N, 1)
+        kp_del     = self.dr_kp_scale - 1.0                                # (N, 3)
+        ms_del     = self.dr_motor_str - 1.0                               # (N, 3)
+        delay      = (self.dr_action_delay.float() / 2.0).unsqueeze(-1)    # (N, 1) ∈ [0,1]
+        kd_del     = self.dr_kd_scale - 1.0                                # (N, 3)
+        com_off    = self.dr_com_offset                                     # (N, 3) metres
+        internal   = torch.cat(
+            [fric, rest, m_del, pyld, kp_del, ms_del, delay, kd_del, com_off], dim=-1)  # (N, 20)
 
-        # 6: body velocity along rail (x-velocity of prismatic body)
-        body_vx = self.robot.data.body_lin_vel_w[:, self._linear_body_idx, 0:1]  # (N,1)
+        # Ablation masking — Exp. 2 (group) and diagnostic (per-component)
+        # xt layout: external = [cf_vec(0:3), cf_flag(3:4), torques(4:7), accels(7:10), push_f(10:13)]
+        mode = getattr(self.cfg, "priv_mode", "FULL").upper()
+        if mode == "INT":
+            external = torch.zeros_like(external)
+        elif mode == "EXT":
+            internal = torch.zeros_like(internal)
+        # Diagnostic: FULL minus one external component at a time
+        elif mode == "FULL_NO_CF":      # remove contact force vec + flag
+            external = external.clone(); external[:, 0:4] = 0.0
+        elif mode == "FULL_NO_TORQ":    # remove joint torques
+            external = external.clone(); external[:, 4:7] = 0.0
+        elif mode == "FULL_NO_ACCEL":   # remove joint accelerations
+            external = external.clone(); external[:, 7:10] = 0.0
+        elif mode == "FULL_NO_PUSH":    # remove push-force signal
+            external = external.clone(); external[:, 10:13] = 0.0
 
-        # 7: normalised cycle time  [0.4s,1.0s] → [0,1]
-        cycle_norm = ((self.cycle_time - 0.4) / 0.6).unsqueeze(-1)   # (N,1)
-
-        # 8: linear joint velocity (velocity of prismatic joint)
-        lin_vel = self.robot.data.joint_vel[:, self._linear_joint_idx]   # (N,1) or (N,?)
-        if lin_vel.dim() == 1:
-            lin_vel = lin_vel.unsqueeze(-1)
-
-        return torch.cat(
-            [stiffness_norm, damping_norm, exact_force,
-             foot_vx, foot_vz, body_vx, cycle_norm, lin_vel],
-            dim=-1,
-        )   # (N, 8)
-
-    # ── DR: randomise actuator gains at each episode reset ────────────────
-    def _reset_dr(self, env_ids: torch.Tensor):
-        n  = len(env_ids)
-        ks = torch.empty(n, device=self.device).uniform_(*_STIFFNESS_RANGE)
-        kd = torch.empty(n, device=self.device).uniform_(*_DAMPING_RANGE)
-
-        self.stiffness_scale[env_ids] = ks
-        self.damping_scale[env_ids]   = kd
-
-        mdp.randomize_actuator_gains(
-            self,
-            env_ids,
-            asset_cfg=SceneEntityCfg("robot"),
-            stiffness_distribution_params=(_NOMINAL_STIFFNESS * _STIFFNESS_RANGE[0],
-                                           _NOMINAL_STIFFNESS * _STIFFNESS_RANGE[1]),
-            damping_distribution_params  =(_NOMINAL_DAMPING   * _DAMPING_RANGE[0],
-                                           _NOMINAL_DAMPING   * _DAMPING_RANGE[1]),
-            operation="abs",
-        )
+        return torch.cat([external, internal], dim=-1)   # (N, 33) — Ext first, Int second

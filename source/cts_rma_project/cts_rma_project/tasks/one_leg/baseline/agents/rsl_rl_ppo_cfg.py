@@ -10,7 +10,7 @@ from isaaclab_rl.rsl_rl import (  # type: ignore
 @configclass
 class OneLegBaselinePPOCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env       = 24
-    max_iterations          = 3000
+    max_iterations          = 5000
     save_interval           = 200
     experiment_name         = "one_leg_baseline"
     empirical_normalization = False

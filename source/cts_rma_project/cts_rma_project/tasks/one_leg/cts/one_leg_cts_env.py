@@ -1,120 +1,82 @@
 # tasks/one_leg/cts/one_leg_cts_env.py
 """
-One-legged hopper — CTS environments.
+One-legged hopper — CTS environment (paper Section 3.2).
 
-CTS = Concurrent Teacher-Student (sequential implementation):
+Concurrent Teacher-Student (1-stage, 75 % teacher / 25 % student).
 
-  Phase 1 — Teacher training
-    OneLegCTSTeacherEnv: policy sees 22-D (14 prop + 8 privileged).
-    Trained with standard PPO. Saved as the "teacher checkpoint".
+obs["policy"]  = 76-D  (75D unified obs + 1D is_teacher flag)
+    Teacher envs (is_teacher=1): [ot(15), xt(24), zeros(36), 1.0]
+    Student envs (is_teacher=0): [obs_history(H=5×15=75), 0.0]
 
-  Phase 2 — Student distillation
-    OneLegCTSStudentEnv: policy sees 14-D (same as Baseline).
-    A frozen teacher is loaded at init. At each step the teacher's
-    action is computed and added as a "teacher imitation reward":
-        r_imitate = -alpha * ||student_action - teacher_action||²
-    alpha decays from 1.0 → 0.1 over the first 1000 iterations so
-    the student transitions from pure imitation to RL-guided behavior.
+obs["critic"]  = 39-D  [ot, xt]  for ALL envs — privileged critic.
+    (Used both for value estimation and as L_rec supervision target.)
+
+The env inherits all DR, reward, scene, and reset logic from OneLegRMAEnv.
 """
 from __future__ import annotations
 import torch
 
-from ..baseline.one_leg_env import OneLegBaselineEnv
-from ..rma.one_leg_rma_env  import OneLegRMAEnv
-from .one_leg_cts_env_cfg   import OneLegCTSTeacherEnvCfg, OneLegCTSStudentEnvCfg
+from ..rma.one_leg_rma_env import OneLegRMAEnv
+from .one_leg_cts_env_cfg   import OneLegCTSEnvCfg
+
+_OBS_DIM      = 15    # ot dimension
+_PRIV_DIM     = 33    # xt dimension = External(13) + Internal(20)
+_TEACHER_IN   = _OBS_DIM + _PRIV_DIM   # 48
+_UNIFIED_DIM  = 75    # max(48+pad27, H*15) = 75  — teacher uses [0:48], student [0:75]
+_H            = 5     # observation history length for student
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Phase 1 — Teacher  (22-D obs, full privileged info)
-# ══════════════════════════════════════════════════════════════════════════════
+class OneLegCTSEnv(OneLegRMAEnv):
+    """Concurrent Teacher-Student env — 75 % teacher / 25 % student envs."""
 
-class OneLegCTSTeacherEnv(OneLegRMAEnv):
-    """
-    CTS teacher: actor AND critic see the full 22-D privileged obs.
+    cfg: OneLegCTSEnvCfg
 
-    Difference from RMA:
-    - RMA   → actor=14D, critic=22D  (asymmetric AC)
-    - CTS teacher → actor=22D, critic=22D  (both see everything)
-
-    At deployment the teacher policy cannot run on real hardware (needs
-    privileged info).  It is frozen and used only to guide the student.
-    """
-
-    cfg: OneLegCTSTeacherEnvCfg
-
-    def _get_observations(self) -> dict:
-        # Build base obs (also updates all state buffers)
-        base_dict  = OneLegBaselineEnv._get_observations(self)  # → {"policy": 14D}
-        privileged = self._get_privileged_obs()                  # (N, 8)
-        teacher_obs = torch.cat([base_dict["policy"], privileged], dim=-1)  # (N, 22)
-
-        # Both actor and critic see the full 22-D obs
-        return {"policy": teacher_obs}
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Phase 2 — Student  (14-D obs + teacher imitation reward)
-# ══════════════════════════════════════════════════════════════════════════════
-
-class OneLegCTSStudentEnv(OneLegRMAEnv):
-    """
-    CTS student: actor sees 14-D obs (deployable on real hardware).
-
-    Loads a frozen teacher checkpoint at init. Each step computes the
-    teacher's action and adds a behavioral-cloning reward that decays
-    over training so the student ultimately relies on RL signal.
-    """
-
-    cfg: OneLegCTSStudentEnvCfg
-
-    def __init__(self, cfg: OneLegCTSStudentEnvCfg, render_mode=None, **kwargs):
+    def __init__(self, cfg: OneLegCTSEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
-        self._teacher_policy  = None   # set via load_teacher()
-        self._teacher_actions = torch.zeros(self.num_envs, self.num_actuated, device=self.device)
-        self._imitation_alpha = cfg.imitation_alpha_start
-        self._iteration       = 0
+        N = self.num_envs
 
-    # ── Public API ────────────────────────────────────────────────────────
-    def load_teacher(self, teacher_policy):
-        """Call this once after creating the env to supply the frozen teacher."""
-        self._teacher_policy = teacher_policy
-        for p in self._teacher_policy.parameters():
-            p.requires_grad_(False)
-        self._teacher_policy.eval()
+        # ── Teacher/student split (fixed for the training run) ────────────
+        n_teacher = int(N * cfg.teacher_ratio)
+        is_t      = torch.zeros(N, dtype=torch.bool, device=self.device)
+        is_t[:n_teacher] = True
+        self.is_teacher: torch.Tensor = is_t            # (N,) bool
 
-    def step_iteration(self):
-        """Call once per training iteration to decay the imitation weight."""
-        self._iteration += 1
-        frac = min(self._iteration / self.cfg.imitation_decay_iters, 1.0)
-        self._imitation_alpha = (
-            self.cfg.imitation_alpha_start
-            + frac * (self.cfg.imitation_alpha_end - self.cfg.imitation_alpha_start)
-        )
+        # ── Observation history buffer for student encoder ────────────────
+        self.obs_history = torch.zeros(N, _H, _OBS_DIM, device=self.device)
 
-    # ── Override obs — student sees only 14-D ────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════
+    # Observations
+    # ══════════════════════════════════════════════════════════════════════
     def _get_observations(self) -> dict:
-        base_dict  = OneLegBaselineEnv._get_observations(self)  # {"policy": 14D}
-        privileged = self._get_privileged_obs()                  # (N, 8) — for teacher only
+        # 1. RMA env gives [ot, xt] = 39D for all envs
+        base = super()._get_observations()          # {"policy": (N, 39)}
+        teacher_input = base["policy"]              # (N, 39): [ot, xt]
+        ot = teacher_input[:, :_OBS_DIM]            # (N, 15)
 
-        # Compute teacher action with frozen teacher (no grad)
-        if self._teacher_policy is not None:
-            teacher_obs = torch.cat([base_dict["policy"], privileged], dim=-1)
-            with torch.no_grad():
-                self._teacher_actions = self._teacher_policy(teacher_obs)
+        # 2. Roll history: drop oldest, append latest ot
+        self.obs_history = torch.roll(self.obs_history, -1, dims=1)
+        self.obs_history[:, -1, :] = ot
 
-        return base_dict   # student sees 14-D only
+        # 3. Build 75D unified obs
+        unified = torch.zeros(self.num_envs, _UNIFIED_DIM, device=self.device)
+        # Teacher envs: first 39D = [ot, xt], rest = zeros (already zero)
+        unified[self.is_teacher, :_TEACHER_IN] = teacher_input[self.is_teacher]
+        # Student envs: full 75D = flattened history
+        unified[~self.is_teacher] = self.obs_history[~self.is_teacher].reshape(-1, _H * _OBS_DIM)
 
-    # ── Override reward — add imitation term ─────────────────────────────
-    def _get_rewards(self) -> torch.Tensor:
-        rl_reward = super()._get_rewards()
+        # 4. Append is_teacher flag as final dim → 76D policy obs
+        flag      = self.is_teacher.float().unsqueeze(-1)   # (N, 1)
+        policy_76 = torch.cat([unified, flag], dim=-1)      # (N, 76)
 
-        # Imitation reward: negative MSE between student and teacher actions
-        # Computed on self.actions which holds the student policy output
-        imitation = -torch.sum(
-            (self.actions - self._teacher_actions.detach()) ** 2, dim=1
-        )
-        total = rl_reward + self._imitation_alpha * imitation
+        return {
+            "policy": policy_76,      # (N, 76) — routed by CTSActorCritic via obs[:, -1]
+            "critic": teacher_input,  # (N, 39) — privileged for critic + L_rec target
+        }
 
-        self.extras["log"]["imitation_alpha"] = self._imitation_alpha
-        self.extras["log"]["imitation_loss"]  = float(-imitation.mean())
-        return total
+    # ══════════════════════════════════════════════════════════════════════
+    # Reset: clear history for reset envs
+    # ══════════════════════════════════════════════════════════════════════
+    def _reset_idx(self, env_ids: torch.Tensor | None):
+        super()._reset_idx(env_ids)
+        if env_ids is not None:
+            self.obs_history[env_ids] = 0.0

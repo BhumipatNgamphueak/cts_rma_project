@@ -8,8 +8,8 @@ import argparse, sys
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--num_envs",       type=int, default=1024)
-parser.add_argument("--max_iterations", type=int, default=3000)
+parser.add_argument("--num_envs",       type=int, default=2048)
+parser.add_argument("--max_iterations", type=int, default=2000)
 parser.add_argument("--experiment",     type=str, default="one_leg_baseline")
 parser.add_argument("--seed",           type=int, default=42)
 parser.add_argument("--checkpoint",     type=str, default=None)

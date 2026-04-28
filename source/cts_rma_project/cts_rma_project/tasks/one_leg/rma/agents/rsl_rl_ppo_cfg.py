@@ -10,15 +10,16 @@ from isaaclab_rl.rsl_rl import (  # type: ignore
 @configclass
 class OneLegRMAPPOCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env       = 24
-    max_iterations          = 3000
+    max_iterations          = 5000
     save_interval           = 200
     experiment_name         = "one_leg_rma"
     empirical_normalization = False
 
     policy = RslRlPpoActorCriticCfg(
+        class_name="RMAActorCritic",
         init_noise_std=1.0,
-        actor_hidden_dims=[256, 128, 64],   # same as Baseline
-        critic_hidden_dims=[256, 128, 64],  # critic input is 22-D (handled internally)
+        actor_hidden_dims=[256, 128, 64],
+        critic_hidden_dims=[256, 128, 64],
         activation="elu",
     )
     algorithm = RslRlPpoAlgorithmCfg(
