@@ -29,6 +29,8 @@ parser.add_argument("--num_episodes",      type=int,   default=100)
 parser.add_argument("--num_envs",          type=int,   default=64)
 parser.add_argument("--priv_mode",         type=str,   default="FULL",
                     choices=["FULL", "INT", "EXT"])
+parser.add_argument("--history_len",       type=int,   default=50,
+                    help="CTS student history length H (must match training; default 50)")
 parser.add_argument("--results_file",      type=str,   default=None)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -120,18 +122,20 @@ def _load_rma2(ckpt: dict, phase2_path: str, device: str):
     return ac, phi, latent_dim
 
 
-def _load_cts(ckpt: dict, device: str):
+def _load_cts(ckpt: dict, device: str, history_len: int = 50):
     from cts_rma_project.tasks.one_leg.cts.cts_policy import CTSActorCritic
     sd         = ckpt.get("model_state_dict", ckpt)
     latent_dim = sd["student_fc.weight"].shape[0]
-    print(f"[eval] CTS latent_dim={latent_dim}")
-    policy = CTSActorCritic(num_actor_obs=76, num_critic_obs=48,
-                            num_actions=3, latent_dim=latent_dim).to(device)
+    print(f"[eval] CTS latent_dim={latent_dim}  history_len={history_len}")
+    policy = CTSActorCritic(num_actor_obs=history_len * 15 + 1, num_critic_obs=48,
+                            num_actions=3, latent_dim=latent_dim,
+                            history_len=history_len).to(device)
     policy.load_state_dict(sd, strict=False)
     return policy, None, latent_dim
 
 
-def _make_env(method: str, num_envs: int, dr_scale: float, priv_mode: str, device: str):
+def _make_env(method: str, num_envs: int, dr_scale: float, priv_mode: str, device: str,
+              history_len: int = 50):
     if method == "baseline":
         from cts_rma_project.tasks.one_leg.baseline.one_leg_env_cfg import OneLegEnvCfg
         cfg    = OneLegEnvCfg()
@@ -143,10 +147,12 @@ def _make_env(method: str, num_envs: int, dr_scale: float, priv_mode: str, devic
         gym_id        = "OneLeg-RMA-v0"
     else:  # cts
         from cts_rma_project.tasks.one_leg.cts.one_leg_cts_env_cfg import OneLegCTSEnvCfg
-        cfg               = OneLegCTSEnvCfg()
-        cfg.priv_mode     = priv_mode
-        cfg.teacher_ratio = 0.0
-        gym_id            = "OneLeg-CTS-v0"
+        cfg                   = OneLegCTSEnvCfg()
+        cfg.priv_mode         = priv_mode
+        cfg.teacher_ratio     = 0.0
+        cfg.history_len       = history_len
+        cfg.observation_space = history_len * 15 + 1
+        gym_id                = "OneLeg-CTS-v0"
 
     cfg.scene.num_envs = num_envs
     cfg.sim.device     = device
@@ -178,12 +184,12 @@ def main():
     elif method == "rma2":
         policy, phi, latent_dim = _load_rma2(ckpt, args_cli.phase2_checkpoint, device)
     else:
-        policy, phi, latent_dim = _load_cts(ckpt, device)
+        policy, phi, latent_dim = _load_cts(ckpt, device, args_cli.history_len)
 
     policy.eval()
 
     # ── Environment ───────────────────────────────────────────────────────
-    env = _make_env(method, num_envs, dr_scale, priv_mode, device)
+    env = _make_env(method, num_envs, dr_scale, priv_mode, device, args_cli.history_len)
     max_steps      = int(env.unwrapped.max_episode_length)
     success_thresh = int(0.8 * max_steps)
     print(f"[eval] method={method} priv={priv_mode} dr={dr_scale:.1f}x "

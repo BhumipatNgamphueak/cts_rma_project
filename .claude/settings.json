@@ -1,0 +1,42 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import ast; ast.parse\\(open\\('scripts/eval_ood_go2.py'\\).read\\(\\)\\); print\\('eval_ood_go2.py OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('scripts/gait_metrics.py'\\).read\\(\\)\\); print\\('gait_metrics.py OK'\\)\")",
+      "Bash(awk '{for\\(i=11;i<=NF;i++\\) printf \"%s \", $i; print \"\"}')",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('scripts/eval_ood_go2.py'\\).read\\(\\)\\); print\\('eval_ood_go2.py    OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('scripts/sim2sim/sim2sim_go2.py'\\).read\\(\\)\\); print\\('sim2sim_go2.py     OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('scripts/gait_metrics.py'\\).read\\(\\)\\); print\\('gait_metrics.py    OK'\\)\")",
+      "Bash(grep -nA5 \"def print_dr_table\" scripts/sim2sim/sim2sim_go2.py)",
+      "Bash(python scripts/plot_results_go2.py --ood results/ood_go2.csv --sim2sim results/sim2sim_go2.csv)",
+      "Bash(awk '{print $NF, \"\\(\"$5\" bytes\\)\"}')",
+      "Bash(awk '{printf \"  %-50s  %s bytes\\\\n\", $NF, $5}')",
+      "Bash(awk -F, 'NR==1 || /,CTS,/' results/ood_go2.csv)",
+      "Bash(awk -F, 'NR==1 || /,CTS,/' results/sim2sim_go2.csv)",
+      "Bash(python3 -c ' *)",
+      "Bash(awk '{printf \"  %-55s  %6s bytes\\\\n\", $NF, $5}')",
+      "Bash(awk 'NR>1 {printf \"  %-45s  %6s bytes\\\\n\", $NF, $5}')",
+      "Bash(cd /home/drl-68/t_s_policy/cts_rma_project *)",
+      "Bash(grep -nA3 \"if len\\(sims_present\\) > 1\" scripts/plot_results_go2.py)",
+      "Bash(awk '{printf \"  %-50s  %6s bytes\\\\n\", $NF, $5}')",
+      "Bash(grep -nB1 -A20 \"def fig_gait_quality\" scripts/plot_results_go2.py)",
+      "Bash(bash -n scripts/run_one_leg_eval.sh)",
+      "Read(//dev/**)",
+      "Bash(awk -F, 'NR==1{for\\(i=1;i<=NF;i++\\) print i\": \"$i}' /home/drl-68/t_s_policy/cts_rma_project/results/ood_go2.csv)",
+      "Bash(awk -F',' '{ printf \"%s\\\\t%s\\\\tDR=%s\\\\tR=%.1f±%.1f\\\\tsucc=%.1f%%\\\\tlin_tr=%.3f\\\\trmse=%.3f\\\\n\", $1, $2, $5, $7, $8, $11, $15, $19 }' /home/drl-68/t_s_policy/cts_rma_project/results/sim2sim_go2.csv)",
+      "Bash(awk -F',' 'NR>1 { printf \"%s\\\\t%s\\\\tDR=%s\\\\tR=%.1f±%.1f\\\\tsucc=%.1f%%\\\\tlin_tr=%.3f\\\\trmse=%.3f\\\\n\", $1, $2, $5, $7, $8, $11, $15, $19 }' /home/drl-68/t_s_policy/cts_rma_project/results/ood_go2.csv)",
+      "Bash(awk '{print $9}')",
+      "Bash(chmod +x /home/drl-68/t_s_policy/cts_rma_project/scripts/run_cts_priv_ablation.sh)",
+      "Bash(bash -n /home/drl-68/t_s_policy/cts_rma_project/scripts/run_cts_priv_ablation.sh)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('scripts/plot_results_go2.py'\\).read\\(\\)\\); print\\('parse OK'\\)\")",
+      "Bash(python scripts/plot_results_go2.py)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('scripts/sim2sim/sim2sim_go2.py'\\).read\\(\\)\\); print\\('parse OK'\\)\")",
+      "Bash(awk -F',' 'NR==1 || $2==\"CTS\"' /home/drl-68/t_s_policy/cts_rma_project/results/ood_go2.csv)",
+      "Bash(awk -F',' 'NR==1 || $2==\"CTS\"' /home/drl-68/t_s_policy/cts_rma_project/results/sim2sim_go2.csv)",
+      "Bash(python)"
+    ],
+    "additionalDirectories": [
+      "/home/drl-68/t_s_policy/cts_rma_project/results/figures"
+    ]
+  }
+}

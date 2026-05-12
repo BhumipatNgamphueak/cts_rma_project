@@ -30,6 +30,7 @@ parser.add_argument("--checkpoint",       type=str, required=True)
 parser.add_argument("--adapt_checkpoint", type=str, default=None,
                     help="Path to Phase 2 adaptation module .pt")
 parser.add_argument("--num_envs",         type=int, default=32)
+parser.add_argument("--latent_dim",       type=int, default=8)
 parser.add_argument("--history_len",      type=int, default=50)
 parser.add_argument("--video",            action="store_true")
 parser.add_argument("--video_length",     type=int, default=200)
@@ -77,12 +78,13 @@ def main():
     env = RslRlVecEnvWrapper(env)
 
     # ── load Phase 1 model ───────────────────────────────────────────────
-    obs_dim = env.observation_space.shape[0]
-    act_dim = env.action_space.shape[0]
+    obs_dim  = env.num_obs
+    act_dim  = env.num_actions
+    crit_dim = env.num_privileged_obs or obs_dim
 
     rma_model = RMAActorCritic(
-        num_actor_obs=obs_dim, num_critic_obs=obs_dim,
-        num_actions=act_dim, env_factor_dim=17, latent_dim=8,
+        num_actor_obs=obs_dim, num_critic_obs=crit_dim,
+        num_actions=act_dim, env_factor_dim=26, latent_dim=args_cli.latent_dim,
     ).to(device)
 
     ckpt = torch.load(args_cli.checkpoint, map_location=device)

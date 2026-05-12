@@ -1,0 +1,7 @@
+method,priv_mode,latent_dim,dr_scale,mean_reward,std_reward,mean_length,std_length,success_rate,episodes,checkpoint,timestamp
+BASELINE,FULL,N/A,1.0,2043.8251,86.4977,999.0,0.0,100.0,100,model_final.pt,2026-05-11 19:47:12
+CTS,FULL,8,1.0,1549.6811,134.3850,999.0,0.0,100.0,100,model_final.pt,2026-05-11 19:47:59
+RMA,FULL,8,1.0,1879.5405,161.3344,999.0,0.0,100.0,100,model_final.pt,2026-05-11 19:48:42
+BASELINE,FULL,N/A,2.0,1802.0817,336.2581,999.0,0.0,100.0,100,model_final.pt,2026-05-11 19:49:23
+CTS,FULL,8,2.0,1413.7999,261.0409,999.0,0.0,100.0,100,model_final.pt,2026-05-11 19:50:11
+RMA,FULL,8,2.0,1741.0198,276.9607,999.0,0.0,100.0,100,model_final.pt,2026-05-11 19:50:54

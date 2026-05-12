@@ -70,8 +70,9 @@ class CTSRunner(OnPolicyRunner):
             student_mask = obs_b[:, -1] <= 0.5
             if not student_mask.any():
                 continue
+            h_dim = self.policy._history_len * 15
             pairs.append((
-                obs_b[student_mask, :75].clone(),       # history (Bs, 75)
+                obs_b[student_mask, :h_dim].clone(),    # history (Bs, H*15)
                 crit_b[student_mask, 15:48].clone(),    # xt only (Bs, 33)
             ))
         return pairs

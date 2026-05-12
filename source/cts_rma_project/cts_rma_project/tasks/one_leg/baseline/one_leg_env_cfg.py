@@ -23,7 +23,7 @@ class OneLegEnvCfg(DirectRLEnvCfg):
     episode_length_s: float = 10.0
 
     # ── Observation / action spaces ──────────────────────────────────────────
-    # Table 1: qt(3)+q̇t(3)+at-1(3)+p_ref_foot(3)+ct(1)+sinφ(1)+cosφ(1) = 15
+    # qt(3)+q̇t(3)+at-1(3)+p_ref_foot(3)+ct(1)+sinφ(1)+cosφ(1) = 15
     observation_space: int = 15
     action_space: int = 3        # hip, knee, ankle position targets
     state_space: int = 0

@@ -21,3 +21,13 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:RMAPPORunnerCfg",
     },
 )
+
+gym.register(
+    id="Template-RMA-Teacher-GO2-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": rma_env_cfg.RMATeacherEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:RMATeacherPPORunnerCfg",
+    },
+)

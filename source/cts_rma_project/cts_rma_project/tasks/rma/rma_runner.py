@@ -1,45 +1,17 @@
 # tasks/rma/rma_runner.py
 """
-Two-phase RMA training runner.
+RMA Phase 2 runner — supervised adaptation module training.
 
-Phase 1: PPO with ground truth extrinsics z_t = μ(e_t)
-Phase 2: Supervised learning for adaptation module φ
+Phase 1 uses standard OnPolicyRunner (see scripts/rma/train_phase1.py).
+Phase 2 trains AdaptationModule φ to regress z_t = μ(e_t) from obs/action history.
 """
 
 import os
 import torch
 import torch.nn as nn
 from torch.optim import Adam
-from collections import deque
-from rsl_rl.runners import OnPolicyRunner  # type: ignore
 
 from .rma_network import RMAActorCritic, AdaptationModule
-
-
-class RMAPhase1Runner(OnPolicyRunner):
-    """
-    Phase 1: extend RSL-RL runner to pass privileged_obs to actor.
-    The env must provide obs_dict["privileged"] = e_t.
-    """
-
-    def _collect_rollout(self):
-        """Override to pass privileged obs to actor."""
-        for _ in range(self.num_steps_per_env):
-            obs_dict = self.env.get_observations()
-            obs        = obs_dict["policy"]       # x_t  [N, 30]
-            priv_obs   = obs_dict["privileged"]   # e_t  [N, 17]
-
-            with torch.inference_mode():
-                actions = self.alg.actor_critic.act(obs, privileged_obs=priv_obs)
-
-            obs_dict_next, rewards, dones, infos = self.env.step(actions)
-            self.alg.process_env_step(rewards, dones, infos)
-            obs = obs_dict_next["policy"]
-
-        last_obs      = obs
-        last_priv_obs = self.env.get_observations()["privileged"]
-        last_values   = self.alg.actor_critic.evaluate(last_obs, last_priv_obs)[2]
-        self.alg.compute_returns(last_values)
 
 
 class RMAPhase2Runner:
@@ -55,7 +27,10 @@ class RMAPhase2Runner:
                  batch_size: int = 80000,
                  learning_rate: float = 5e-4,
                  log_dir: str = "logs/rma/phase2",
-                 device: str = "cuda"):
+                 device: str = "cuda",
+                 state_dim: int = 37,
+                 latent_dim: int = 8,
+                 priv_dim: int = 26):
         self.env          = env
         self.rma          = rma_model.to(device)
         self.device       = device
@@ -63,19 +38,20 @@ class RMAPhase2Runner:
         self.num_iters    = num_iterations
         self.batch_size   = batch_size
         self.log_dir      = log_dir
+        self.state_dim    = state_dim
+        self.latent_dim   = latent_dim
+        self.priv_dim     = priv_dim   # x_t size in the critic group: FULL=26/INT=16/EXT=10
 
-        # Build adaptation module
         self.adapt_module = AdaptationModule(
-            state_dim=30, action_dim=12, embed_dim=32, latent_dim=8,
+            state_dim=state_dim, action_dim=12, embed_dim=32, latent_dim=latent_dim,
             history_len=history_len
         ).to(device)
 
         self.optimizer = Adam(self.adapt_module.parameters(), lr=learning_rate)
         self.loss_fn   = nn.MSELoss()
 
-        # Ring buffers for history  [N, history_len, dim]
         N = env.num_envs
-        self.state_hist  = torch.zeros(N, history_len, 30, device=device)
+        self.state_hist  = torch.zeros(N, history_len, state_dim, device=device)
         self.action_hist = torch.zeros(N, history_len, 12, device=device)
 
         os.makedirs(log_dir, exist_ok=True)
@@ -99,41 +75,35 @@ class RMAPhase2Runner:
             collected_actions = []
             collected_z_true  = []
 
-            obs_dict   = self.env.reset()
-            x_t        = obs_dict["policy"]
-            priv_obs   = obs_dict["privileged"]
-            prev_action = torch.zeros(self.env.num_envs, 12, device=self.device)
+            obs_dict, _  = self.env.reset()
+            x_t          = obs_dict["policy"].to(self.device)
+            # critic group: [ot(37), xt(priv_dim)] — extract xt for teacher encoder
+            xt           = obs_dict["critic"].to(self.device)[:, 37:37 + self.priv_dim]
 
             steps_per_iter = self.batch_size // self.env.num_envs
 
             for step in range(steps_per_iter):
-                # Estimate ẑ using current adaptation module
                 with torch.inference_mode():
                     z_hat  = self.adapt_module(self.state_hist, self.action_hist)
-                    action = self.rma.policy(x_t, prev_action, z_hat)
-
-                # Ground truth z from privileged encoder
-                with torch.inference_mode():
-                    z_true = self.rma.env_encoder(priv_obs)
+                    action = self.rma.policy(x_t, z_hat)   # BasePolicy: (ot, z) → a
+                    z_true = self.rma.env_encoder(xt)
 
                 collected_states.append(self.state_hist.clone())
                 collected_actions.append(self.action_hist.clone())
                 collected_z_true.append(z_true)
 
-                obs_dict_next, _, dones, _ = self.env.step(action)
-                next_x = obs_dict_next["policy"]
+                obs_dict_next, _, terminated, truncated, _ = self.env.step(action)
+                dones  = terminated | truncated
+                next_x = obs_dict_next["policy"].to(self.device)
+                xt     = obs_dict_next["critic"].to(self.device)[:, 37:37 + self.priv_dim]
 
-                # Update history
                 self._roll_history(x_t, action)
 
-                # Reset history on episode end
                 if dones.any():
                     self.state_hist[dones]  = 0.0
                     self.action_hist[dones] = 0.0
 
-                x_t        = next_x
-                priv_obs   = obs_dict_next["privileged"]
-                prev_action = action.detach()
+                x_t = next_x
 
             # === Supervised update ===
             states  = torch.stack(collected_states,  dim=1).flatten(0, 1)   # [steps*N, H, 30]

@@ -27,6 +27,11 @@ parser.add_argument("--history_len",    type=int,   default=50,
                     help="Number of (state, action) timesteps fed to φ")
 parser.add_argument("--batch_size",     type=int,   default=80000)
 parser.add_argument("--lr",             type=float, default=5e-4)
+parser.add_argument("--latent_dim",     type=int,   default=8,
+                    help="Must match the Phase 1 checkpoint latent_dim (8/16/32/64/128)")
+parser.add_argument("--priv_mode",      type=str,   default="FULL",
+                    choices=["FULL", "INT", "EXT"],
+                    help="Must match the Phase 1 checkpoint priv_mode (FULL/INT/EXT)")
 parser.add_argument("--seed",           type=int,   default=42)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -47,30 +52,35 @@ import cts_rma_project.tasks  # noqa: F401
 from cts_rma_project.tasks.rma.rma_env_cfg import RMAEnvCfg
 from cts_rma_project.tasks.rma.rma_network import RMAActorCritic
 from cts_rma_project.tasks.rma.rma_runner  import RMAPhase2Runner
+from cts_rma_project.tasks.shared.mdp      import PRIV_DIMS
 
 
 def main():
-    device = args_cli.device or "cuda"
+    device    = args_cli.device or "cuda"
+    priv_mode = args_cli.priv_mode.upper()
+    priv_dim  = PRIV_DIMS[priv_mode]
 
     # ── environment ─────────────────────────────────────────────────────
     env_cfg = RMAEnvCfg()
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device     = device
     env_cfg.seed           = args_cli.seed
+    env_cfg.priv_mode      = priv_mode
 
     env = gym.make("Template-RMA-GO2-v0", cfg=env_cfg)
     env = RslRlVecEnvWrapper(env)
 
     # ── load Phase 1 model ───────────────────────────────────────────────
-    obs_dim = env.observation_space.shape[0]
-    act_dim = env.action_space.shape[0]
+    obs_dim  = env.num_obs
+    crit_dim = env.num_privileged_obs or obs_dim
+    act_dim  = env.num_actions
 
     rma_model = RMAActorCritic(
         num_actor_obs=obs_dim,
-        num_critic_obs=obs_dim,
+        num_critic_obs=crit_dim,
         num_actions=act_dim,
-        env_factor_dim=17,
-        latent_dim=8,
+        env_factor_dim=priv_dim,
+        latent_dim=args_cli.latent_dim,
     ).to(device)
 
     checkpoint = torch.load(args_cli.checkpoint, map_location=device)
@@ -95,6 +105,9 @@ def main():
         learning_rate=args_cli.lr,
         log_dir=log_dir,
         device=device,
+        state_dim=obs_dim,
+        latent_dim=args_cli.latent_dim,
+        priv_dim=priv_dim,
     )
 
     phase2_runner.collect_and_train()

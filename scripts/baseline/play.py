@@ -27,6 +27,10 @@ parser.add_argument("--num_envs",     type=int, default=32)
 parser.add_argument("--video",        action="store_true")
 parser.add_argument("--video_length", type=int, default=300)
 parser.add_argument("--real_time",    action="store_true")
+parser.add_argument("--no_push",       action="store_true",
+                    help="Disable push_robot and impulse disturbance events during play")
+parser.add_argument("--no_reset_rand", action="store_true",
+                    help="Disable reset randomisation (default pose + zero velocity every episode)")
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 sys.argv = [sys.argv[0]] + hydra_args
@@ -53,6 +57,20 @@ def main():
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device     = device
 
+    if args_cli.no_push:
+        env_cfg.events.push_robot       = None
+        env_cfg.events.impulse_interval = None
+        env_cfg.events.impulse_reset    = None
+        print("[play] Disturbance events DISABLED")
+
+    if args_cli.no_reset_rand:
+        # Disable reset randomisation — clean start every episode (default pose, zero vel).
+        # If robot still walks → policy genuinely learned locomotion.
+        # If robot stands still → policy only learned to RECOVER from perturbations.
+        env_cfg.events.reset_base   = None
+        env_cfg.events.reset_joints = None
+        print("[play] Reset randomisation DISABLED — clean start (default pose, zero velocity)")
+
     render_mode = "rgb_array" if args_cli.video else None
     env = gym.make("Template-Baseline-GO2-Play-v0", cfg=env_cfg,
                    render_mode=render_mode)
@@ -76,8 +94,8 @@ def main():
 
     # Build a minimal actor using RSL-RL's ActorCritic so we can call act_inference
     from rsl_rl.modules import ActorCritic  # type: ignore
-    obs_dim = env.observation_space.shape[0]
-    act_dim = env.action_space.shape[0]
+    obs_dim = env.num_obs
+    act_dim = env.num_actions
     actor_critic = ActorCritic(
         num_actor_obs=obs_dim,
         num_critic_obs=obs_dim,

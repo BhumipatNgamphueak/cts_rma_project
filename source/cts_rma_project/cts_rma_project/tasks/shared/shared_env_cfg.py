@@ -13,10 +13,10 @@ Contains everything that is IDENTICAL across Baseline, RMA, and CTS:
 Observation groups are NOT defined here; each method subclass provides its
 own observations (proprioceptive-only for Baseline, +privileged for RMA/CTS).
 
-DR groups (Table 4 of project proposal):
-  Mass / inertia : link mass scale [0.80, 1.20], payload [-1, 3] kg
-  Actuator       : Kp [0.80, 1.20], Kd [0.80, 1.20], motor strength [0.80, 1.20], delay [0, 20] ms
-  Contact surface: friction [0.20, 1.70], restitution [0.25, 0.75]
+DR groups (OpenTopic-aligned, mode=reset):
+  Mass / inertia : base mass scale [0.90, 1.10], base inertia scale [0.80, 1.20] (independent)
+  Actuator       : Kp scale [0.85, 1.15], Kd scale [0.80, 1.20], delay [0, 20] ms
+  Contact surface: friction [0.50, 1.50], restitution [0.00, 0.15]
 """
 from __future__ import annotations
 import math
@@ -25,6 +25,7 @@ import isaaclab.envs.mdp as mdp
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import (
+    CurriculumTermCfg,
     EventTermCfg,
     RewardTermCfg,
     SceneEntityCfg,
@@ -71,62 +72,91 @@ class SharedActionsCfg:
 ###############################################################################
 @configclass
 class SharedCommandsCfg:
+    # Start with small commands; curriculum expands toward limit_vel_x/y/ang_z
     base_velocity = mdp.UniformVelocityCommandCfg(
         asset_name="robot",
         resampling_time_range=(10.0, 10.0),
-        rel_standing_envs=0.02,
+        rel_standing_envs=0.10,
         rel_heading_envs=1.0,
         heading_command=True,
         ranges=mdp.UniformVelocityCommandCfg.Ranges(
-            lin_vel_x=(-1.0, 1.0),
-            lin_vel_y=(-1.0, 1.0),
-            ang_vel_z=(-1.0, 1.0),
+            lin_vel_x=(-0.3, 0.3),
+            lin_vel_y=(-0.2, 0.2),
+            ang_vel_z=(-0.5, 0.5),
             heading=(-math.pi, math.pi),
         ),
     )
 
 
 ###############################################################################
-# Rewards  (shared across all three methods — tuned for UNITREE GO2)
-# Reference: Isaac Lab UnitreeGo2RoughEnvCfg (rough_env_cfg.py)
+# Rewards  (matches TXL locomotion task reward structure)
 ###############################################################################
 @configclass
 class SharedRewardsCfg:
-    # ── Primary: command tracking ───────────────────────────────────────────
-    # std = sqrt(0.25) ≈ 0.5 matches Isaac Lab official GO2 config.
-    # Using std=0.25 gives exp(-err/0.0625) ≈ 0 for any error > 0.1 m/s.
-    track_lin_vel = RewardTermCfg(
+    # ── Task: velocity tracking ──────────────────────────────────────────────
+    track_lin_vel_xy = RewardTermCfg(
         func=mdp.track_lin_vel_xy_exp,
         weight=1.5,
         params={"std": math.sqrt(0.25), "command_name": "base_velocity"},
     )
-    track_ang_vel = RewardTermCfg(
+    track_ang_vel_z = RewardTermCfg(
         func=mdp.track_ang_vel_z_exp,
         weight=0.75,
         params={"std": math.sqrt(0.25), "command_name": "base_velocity"},
     )
-    # ── Stability ───────────────────────────────────────────────────────────
-    penalize_ang_vel_xy = RewardTermCfg(func=mdp.ang_vel_xy_l2, weight=-0.05)
-    penalize_z_vel      = RewardTermCfg(func=mdp.lin_vel_z_l2,  weight=-2.0)
-    # ── Smoothness ──────────────────────────────────────────────────────────
-    penalize_action_rate = RewardTermCfg(func=mdp.action_rate_l2,   weight=-0.01)
-    penalize_joint_acc   = RewardTermCfg(func=mdp.joint_acc_l2,     weight=-2.5e-7)
-    # ── Torque cost ─────────────────────────────────────────────────────────
-    # Isaac Lab GO2 flat-env reference: -1e-5  (our old -2e-4 was 20× too strong)
-    penalize_joint_torque = RewardTermCfg(func=mdp.joint_torques_l2, weight=-1e-5)
-    # ── Survival ────────────────────────────────────────────────────────────
-    alive = RewardTermCfg(func=mdp.is_alive, weight=1.0)
-    termination_penalty = RewardTermCfg(func=mdp.is_terminated, weight=-10.0)
-    # ── Gait quality ────────────────────────────────────────────────────────
-    # Rewards feet spending time in the air → robot learns to lift and step.
-    # Isaac Lab GO2 flat-env reference: weight=0.25, threshold=0.5s.
+    # ── Base penalties ───────────────────────────────────────────────────────
+    base_linear_velocity  = RewardTermCfg(func=mdp.lin_vel_z_l2,      weight=-2.0)
+    base_angular_velocity = RewardTermCfg(func=mdp.ang_vel_xy_l2,     weight=-0.05)
+    joint_vel             = RewardTermCfg(func=mdp.joint_vel_l2,       weight=-0.001)
+    joint_acc             = RewardTermCfg(func=mdp.joint_acc_l2,       weight=-2.5e-7)
+    joint_torques         = RewardTermCfg(func=mdp.joint_torques_l2,   weight=-2e-4)
+    action_rate           = RewardTermCfg(func=mdp.action_rate_l2,     weight=-0.1)
+    dof_pos_limits        = RewardTermCfg(func=mdp.joint_pos_limits,   weight=-10.0)
+    energy                = RewardTermCfg(func=shared_mdp.energy,      weight=-2e-5)
+    # ── Robot posture ────────────────────────────────────────────────────────
+    flat_orientation_l2 = RewardTermCfg(func=mdp.flat_orientation_l2, weight=-2.5)
+    joint_pos = RewardTermCfg(
+        func=shared_mdp.joint_position_penalty,
+        weight=-0.7,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+            "stand_still_scale": 5.0,
+            "velocity_threshold": 0.3,
+        },
+    )
+    # ── Feet / gait ──────────────────────────────────────────────────────────
     feet_air_time = RewardTermCfg(
         func=shared_mdp.feet_air_time,
-        weight=0.25,
+        weight=0.1,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
             "command_name": "base_velocity",
             "threshold": 0.5,
+        },
+    )
+    air_time_variance = RewardTermCfg(
+        func=shared_mdp.air_time_variance_penalty,
+        weight=-1.0,
+        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot")},
+    )
+    feet_slide = RewardTermCfg(
+        func=shared_mdp.feet_slide,
+        weight=-0.1,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*_foot"),
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
+        },
+    )
+    # ── Survival ─────────────────────────────────────────────────────────────
+    alive               = RewardTermCfg(func=mdp.is_alive,      weight=1.0)
+    termination_penalty = RewardTermCfg(func=mdp.is_terminated, weight=0.0)
+    # ── Contacts ─────────────────────────────────────────────────────────────
+    undesired_contacts = RewardTermCfg(
+        func=mdp.undesired_contacts,
+        weight=-1.0,
+        params={
+            "threshold": 1.0,
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[".*_hip", ".*_thigh", ".*_calf"]),
         },
     )
 
@@ -137,138 +167,187 @@ class SharedRewardsCfg:
 @configclass
 class SharedTerminationsCfg:
     time_out = TerminationTermCfg(func=mdp.time_out, time_out=True)
+    # 100 N threshold (OpenTopic): avoids killing episodes on minor base touches.
     base_contact = TerminationTermCfg(
         func=mdp.illegal_contact,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names="base"),
-            "threshold": 1.0,
+            "threshold": 100.0,
         },
     )
-    base_height = TerminationTermCfg(
-        func=mdp.root_height_below_minimum,
-        params={"minimum_height": 0.28},
+    # ~69° tilt limit (OpenTopic): gives the robot room to recover from tilts.
+    bad_orientation = TerminationTermCfg(
+        func=mdp.bad_orientation,
+        params={"limit_angle": 1.2},
     )
 
 
 ###############################################################################
-# Events — Domain Randomisation  (Table 4, all three DR groups)
+# Events — Domain Randomisation  (per DR table)
 ###############################################################################
 @configclass
 class SharedEventCfg:
     # ── Reset base pose ─────────────────────────────────────────────────────
+    # SIM2SIM FIX (#1): velocity_range zeroed.
+    # Previously the robot reset with a random ±0.5 m/s linear and ±1.0 rad/s
+    # angular velocity push. The CTS student encoder learned that "robot
+    # starts moving" is the only valid initial state, producing OOD latents
+    # at MuJoCo deployment (which starts at rest) → actor outputs cautious
+    # "stand still" actions and the robot never bootstraps walking.
+    # Resetting at zero velocity teaches all three methods (Baseline / RMA /
+    # CTS) to start walking from rest — the natural deployment scenario.
+    # This change is APPLIED IDENTICALLY to all three methods; comparison
+    # remains fair.
     reset_base = EventTermCfg(
         func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot"),
             "pose_range": {
-                "x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-3.14, 3.14)
+                "x": (-0.5, 0.5), "y": (-0.5, 0.5),
+                "z": (0.0, 0.3),       # height 0–0.3 m
+                "yaw": (-3.14, 3.14),
             },
             "velocity_range": {
-                "x": (-0.5, 0.5), "y": (-0.5, 0.5), "z": (-0.5, 0.5),
-                "roll": (-0.5, 0.5), "pitch": (-0.5, 0.5), "yaw": (-0.5, 0.5),
+                "x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0),
+                "roll": (0.0, 0.0), "pitch": (0.0, 0.0), "yaw": (0.0, 0.0),
             },
         },
     )
+    # Joint position ±60° = ±1.047 rad offset from default; velocity ±1.0 rad/s
     reset_joints = EventTermCfg(
-        func=mdp.reset_joints_by_scale,
+        func=mdp.reset_joints_by_offset,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot"),
-            "position_range": (0.5, 1.5),
-            "velocity_range": (0.0, 0.0),
+            "position_range": (-1.047, 1.047),
+            "velocity_range": (-1.0,   1.0),
         },
     )
 
-    # ── Contact surface (startup — once per training run per env) ───────────
-    # Physics: mdp.randomize_rigid_body_material is a ManagerTermBase class;
-    # it must be registered as an EventTermCfg and cannot be called from plain Python.
+    # ── Physics material (reset — re-randomised every episode) ─────────────
+    # SIM2SIM FIX (#2): wider friction range to span Isaac↔MuJoCo contact
+    # model gap. Even at the same friction coefficient, PhysX and MuJoCo
+    # produce slightly different ground reaction forces; wider DR teaches
+    # all methods to be robust to this. Restitution kept narrow (gait
+    # quality is highly sensitive to bounce).
     randomize_material = EventTermCfg(
         func=mdp.randomize_rigid_body_material,
-        mode="startup",
+        mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            "static_friction_range":  (0.20, 1.70),
-            "dynamic_friction_range": (0.20, 1.70),
-            "restitution_range":      (0.25, 0.75),
+            "static_friction_range":  (0.3, 1.7),    # was (0.5, 1.5)
+            "dynamic_friction_range": (0.3, 1.7),    # was (0.5, 1.5)
+            "restitution_range":      (0.0, 0.15),
             "num_buckets": 64,
         },
     )
-    # Tracking: independent draw from the same distribution → extras["dr"]
-    randomize_material_track = EventTermCfg(
-        func=shared_mdp.randomize_material_and_track,
-        mode="startup",
-        params={
-            "static_friction_range": (0.20, 1.70),
-            "restitution_range":     (0.25, 0.75),
-        },
+    # Step 2: read ACTUAL values back from PhysX (must follow randomize_material)
+    track_material = EventTermCfg(
+        func=shared_mdp.track_material_from_physx,
+        mode="reset",
+        params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
-    # ── Mass / inertia (reset — per episode) ───────────────────────────────
-    # Payload [-1, 3] kg added to base
+    # ── Mass / inertia (reset — re-randomised every episode) ────────────────
+    # SIM2SIM FIX (#2): mass kept narrow (gait sensitive). Inertia widened
+    # to span more dynamics variation.
     randomize_payload = EventTermCfg(
         func=shared_mdp.randomize_payload_and_track,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="base"),
-            "mass_range": (-1.0, 3.0),
+            "mass_scale_range": (0.85, 1.15),    # was (0.9, 1.1)
         },
     )
-    # Leg link mass scale [0.80, 1.20] × nominal
-    randomize_leg_mass = EventTermCfg(
-        func=shared_mdp.randomize_leg_mass_and_track,
+    # Base inertia widened ±30% (was ±20%).
+    randomize_base_inertia = EventTermCfg(
+        func=shared_mdp.randomize_inertia_and_track,
         mode="reset",
         params={
-            "asset_cfg": SceneEntityCfg("robot", body_names=".*_hip|.*_thigh|.*_calf"),
-            "scale_range": (0.80, 1.20),
+            "asset_cfg": SceneEntityCfg("robot", body_names="base"),
+            "scale_range": (0.7, 1.3),    # was (0.8, 1.2)
         },
     )
-
-    # ── Actuator (reset — per episode) ─────────────────────────────────────
-    # Kp scale [0.80, 1.20]
-    randomize_kp = EventTermCfg(
-        func=shared_mdp.randomize_kp_and_track,
+    # ── Actuator gains (reset — re-randomised every episode) ────────────────
+    # SIM2SIM FIX (#2): wider Kp/Kd ranges so the learned actuator-response
+    # mapping covers MuJoCo's slightly different actuator dynamics.
+    randomize_gains = EventTermCfg(
+        func=shared_mdp.randomize_gains_and_track,
         mode="reset",
         params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "scale_range": (0.80, 1.20),
+            "asset_cfg":      SceneEntityCfg("robot"),
+            "kp_scale_range": (0.7, 1.3),    # was (0.85, 1.15)
+            "kd_scale_range": (0.65, 1.35),  # was (0.80, 1.20)
         },
     )
-    # Kd scale [0.80, 1.20]
-    randomize_kd = EventTermCfg(
-        func=shared_mdp.randomize_kd_and_track,
+    # SIM2SIM FIX (#2): wider COM offset (±0.08 m, was ±0.05).
+    randomize_com = EventTermCfg(
+        func=shared_mdp.randomize_com_and_track,
         mode="reset",
         params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "scale_range": (0.80, 1.20),
+            "asset_cfg": SceneEntityCfg("robot", body_names="base"),
+            "com_range": (-0.08, 0.08),    # was (-0.05, 0.05)
         },
     )
-    # Motor strength [0.80, 1.20]
-    randomize_motor_strength = EventTermCfg(
-        func=shared_mdp.randomize_motor_strength_and_track,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "scale_range": (0.80, 1.20),
-        },
-    )
-    # Action delay [0, 20] ms
+    # SIM2SIM FIX (#2): wider action delay range (covers MuJoCo's longer
+    # decimation latency).
     randomize_action_delay = EventTermCfg(
         func=shared_mdp.randomize_action_delay_and_track,
         mode="reset",
-        params={"delay_range_ms": (0.0, 20.0)},
+        params={"delay_range_ms": (0.0, 30.0)},    # was (0.0, 20.0)
     )
 
-    # ── Random pushes (interval — disturbance robustness) ──────────────────
+    # ── Disturbances ────────────────────────────────────────────────────────
+    # Velocity push ±1.0 m/s linear + ±1.0 rad/s angular every 5–10 s
     push_robot = EventTermCfg(
         func=mdp.push_by_setting_velocity,
         mode="interval",
-        interval_range_s=(10.0, 15.0),
+        interval_range_s=(5.0, 10.0),
         params={
             "velocity_range": {
-                "x": (-0.5, 0.5), "y": (-0.5, 0.5), "z": (-0.3, 0.3),
-                "roll": (-0.3, 0.3), "pitch": (-0.3, 0.3), "yaw": (-0.3, 0.3),
+                "x": (-1.0, 1.0), "y": (-1.0, 1.0),
+                "roll": (-1.0, 1.0), "pitch": (-1.0, 1.0), "yaw": (-1.0, 1.0),
             }
+        },
+    )
+    # Force/torque impulse at reset: ±5 N, ±2 Nm
+    impulse_reset = EventTermCfg(
+        func=mdp.apply_external_force_torque,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="base"),
+            "force_range":  (-5.0, 5.0),
+            "torque_range": (-2.0, 2.0),
+        },
+    )
+    # Force/torque impulse every 3–8 s: ±10 N, ±3 Nm
+    impulse_interval = EventTermCfg(
+        func=mdp.apply_external_force_torque,
+        mode="interval",
+        interval_range_s=(3.0, 8.0),
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="base"),
+            "force_range":  (-10.0, 10.0),
+            "torque_range": (-3.0,   3.0),
+        },
+    )
+
+
+###############################################################################
+# Curriculum — velocity command expansion
+###############################################################################
+@configclass
+class SharedCurriculumCfg:
+    # Expand lin_vel and ang_vel ranges when tracking reward > 80% of weight.
+    # Starts at (-0.3,0.3) / (-0.2,0.2) / (-0.5,0.5) → grows to limits below.
+    lin_vel_cmd = CurriculumTermCfg(
+        func=shared_mdp.lin_vel_cmd_curriculum,
+        params={
+            "reward_term_name": "track_lin_vel_xy",
+            "limit_vel_x": (-1.0, 1.0),
+            "limit_vel_y": (-1.0, 1.0),
+            "limit_ang_z": (-1.0, 1.0),
         },
     )
 
@@ -289,10 +368,11 @@ class SharedEnvCfg(ManagerBasedRLEnvCfg):
     rewards:      SharedRewardsCfg      = SharedRewardsCfg()
     terminations: SharedTerminationsCfg = SharedTerminationsCfg()
     events:       SharedEventCfg        = SharedEventCfg()
+    curriculum:   SharedCurriculumCfg   = SharedCurriculumCfg()
 
     def __post_init__(self):
         super().__post_init__()
         self.sim.dt      = 0.005   # 200 Hz physics
-        self.decimation  = 2       # 100 Hz policy (matches paper §4.1)
+        self.decimation  = 4       # 50 Hz policy (matches OpenTopic)
         self.episode_length_s = 20.0
         self.action_space = 12

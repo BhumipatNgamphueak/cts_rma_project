@@ -126,8 +126,8 @@ class OneLegBaselineEnv(DirectRLEnv):
 
         # ── Episode reward logging ────────────────────────────────────────
         self._ep_rew = {k: torch.zeros(self.num_envs, device=self.device)
-                        for k in ["track", "contact", "clear",
-                                  "progress", "phase", "stand", "reg", "total"]}
+                        for k in ["progress", "phase", "distance",
+                                  "stand", "reg", "total"]}
 
     # ══════════════════════════════════════════════════════════════════════
     # Scene
@@ -244,13 +244,21 @@ class OneLegBaselineEnv(DirectRLEnv):
         self.C_frc = torch.where(self.reached_goal, torch.zeros_like(self.C_frc), self.C_frc)
         self.C_vel = torch.where(self.reached_goal, torch.zeros_like(self.C_vel), self.C_vel)
 
-        # p_ref_foot: goal foot position in local (env-origin-relative) frame — Table 1
-        p_ref_foot = self.commands[:, :3] - self.scene.env_origins   # (N, 3)
+        # Reference foot trajectory (3D): encodes gait phase + navigation.
+        # foot_x: goal-directed step reference — sign tells policy which way to move.
+        # foot_y: signed distance to goal (command_obs) — observable navigation signal.
+        # foot_z: swing clearance reference.
+        phase      = self.phase_value
+        goal_dir   = torch.sign(self.command_obs.squeeze(-1))           # (N,) +1 or -1
+        foot_x_ref = 0.05 * goal_dir * torch.sin(2 * math.pi * phase)  # goal-directed
+        foot_y_ref = self.command_obs.squeeze(-1)                       # dist to goal
+        swing_frac = torch.clamp(
+            (phase - self.stance_ratio) / (1 - self.stance_ratio + 1e-6), 0.0, 1.0)
+        foot_z_ref = 0.06 * torch.sin(math.pi * swing_frac)
+        p_ref_foot = torch.stack([foot_x_ref, foot_y_ref, foot_z_ref], dim=-1)  # (N, 3)
 
-        # Phase encoding: sinφ, cosφ  (φ normalised to [0,1))
-        phase     = (self.phase_time % self.cycle_time) / self.cycle_time
-        sin_phase = torch.sin(2.0 * math.pi * phase)                 # (N,)
-        cos_phase = torch.cos(2.0 * math.pi * phase)                 # (N,)
+        sin_phase = torch.sin(2 * math.pi * phase)
+        cos_phase = torch.cos(2 * math.pi * phase)
 
         policy_obs = torch.cat([
             dof_pos,                                        # (N, 3)  qt
@@ -268,33 +276,15 @@ class OneLegBaselineEnv(DirectRLEnv):
     # Rewards
     # ══════════════════════════════════════════════════════════════════════
     def _get_rewards(self) -> torch.Tensor:
-        # ── Paper terms (Section 2.2) ─────────────────────────────────────
-
-        # r_track = exp(-α‖p_ref_foot(φt) - p_foot,t‖²),  α=2
-        p_foot    = self.robot.data.body_link_pos_w[:, self._ee_body_idx, :]  # (N, 3)
-        track_err = torch.sum((self.commands[:, :3] - p_foot) ** 2, dim=-1)   # (N,)
-        r_track   = torch.exp(-2.0 * track_err)
-
-        # r_contact — binary: foot in contact during stance (φ ∈ [0, 0.5))
-        is_stance = self.phase_value < 0.5
-        r_contact = (is_stance & self.is_foot_in_contact).float()
-
-        # r_clear — binary: foot height ≥ h_clear during swing (φ ∈ [0.5, 1.0))
-        h_clear  = 0.05   # 5 cm
-        r_clear  = (~is_stance & (self.foot_height >= h_clear)).float()
-
-        # r_smooth and r_torque are covered by r_reg below
-
-        # ── Current terms (kept as-is) ────────────────────────────────────
-
-        # Progress: 1D goal approach
+        # ── 1. Progress ───────────────────────────────────────────────────
         r_progress = torch.clamp(
             (torch.abs(self.prev_command_obs) - torch.abs(self.command_obs)).squeeze(-1) * 100.0,
             -1.0, 2.0,
         )
 
-        # Phase: continuous stance contact + swing clearance (smooth gating)
+        # ── 2. Phase — stance contact + swing clearance ───────────────────
         contact_reward = 1.0 - torch.exp(-0.01 * self.foot_contact_force)
+
         foot_clearance = torch.clamp(self.foot_height - 0.02, min=0.0)
         swing_quality  = 1.0 - torch.exp(-20.0 * foot_clearance)
         tip_vel_x      = self.robot.data.body_lin_vel_w[:, self._ee_body_idx, 0]
@@ -303,42 +293,42 @@ class OneLegBaselineEnv(DirectRLEnv):
         swing_reward   = 0.7 * swing_quality + 0.3 * torch.clamp(fwd_vel, min=0.0)
         r_phase        = (-self.C_frc) * contact_reward + (-self.C_vel) * swing_reward
 
-        # Stand at goal
+        # ── 3. Distance ───────────────────────────────────────────────────
+        dist       = torch.abs(self.command_obs).squeeze(-1)
+        r_distance = torch.exp(-2.0 * dist)
+
+        # ── 4. Stand at goal ──────────────────────────────────────────────
         joint_err = torch.sum(
             (self.robot.data.joint_pos[:, self.actuated_dof_indices]
              - self.default_joint[:, self.actuated_dof_indices]) ** 2, dim=1)
         r_stand = torch.where(self.reached_goal, torch.exp(-5.0 * joint_err),
                                torch.zeros_like(joint_err))
 
-        # Regularization (covers paper's r_smooth + r_torque)
-        torques_sq  = torch.sum(self.robot.data.applied_torque[:, self.actuated_dof_indices] ** 2, dim=1)
-        accels      = torch.sum(self.robot.data.joint_acc[:, self.actuated_dof_indices] ** 2, dim=1)
+        # ── 5. Regularization ─────────────────────────────────────────────
         action_rate = torch.sum((self.actions - self.prev_actions) ** 2, dim=1)
         action_jerk = torch.sum(
             (self.actions - 2.0 * self.prev_actions + self.prev_prev_actions) ** 2, dim=1)
-        torque    = self.robot.data.applied_torque[:, self.actuated_dof_indices]
-        joint_vel = self.robot.data.joint_vel[:, self.actuated_dof_indices]
-        energy    = torch.sum(torch.abs(torque * joint_vel), dim=1)
-
+        torque     = self.robot.data.applied_torque[:, self.actuated_dof_indices]
+        joint_vel  = self.robot.data.joint_vel[:, self.actuated_dof_indices]
+        torques_sq = torch.clamp(torch.sum(torque ** 2, dim=1), max=1e6)
+        energy     = torch.clamp(torch.sum(torch.abs(torque * joint_vel), dim=1), max=1e6)
         r_reg = (-0.05 * action_rate - 0.02 * action_jerk
-                 - 2.5e-5 * torques_sq - 6.0e-7 * accels - 2.5e-5 * energy)
+                 - 2.5e-5 * torques_sq - 2.5e-5 * energy)
 
         # ── Combine ───────────────────────────────────────────────────────
-        # Smooth loco_scale: 1.0 when ≥0.5m away, decays to 0.2 at goal.
-        # Avoids the sudden 10× cliff that caused reward to crash on first goal reach.
-        dist       = torch.abs(self.command_obs).squeeze(-1)   # (N,) x-distance to goal
-        loco_scale = torch.clamp(dist / 0.5, min=0.2, max=1.0)
-        reward = (1.0 * r_track                      # paper: 3D foot tracking
-                  + 0.5 * r_contact                  # paper: binary stance contact
-                  + 0.5 * r_clear                    # paper: binary swing clearance
-                  + 2.0 * r_progress * loco_scale    # current: 1D goal progress
-                  + 1.5 * r_phase    * loco_scale    # current: continuous phase gating
-                  + 1.0 * r_stand                    # current: stand at goal
-                  + 1.0 * r_reg)                     # current: r_smooth + r_torque
+        locomotion_scale = torch.where(self.reached_goal,
+                                       torch.tensor(0.1, device=self.device),
+                                       torch.tensor(1.0, device=self.device))
+        reward = (2.0 * r_progress * locomotion_scale
+                  + 1.5 * r_phase   * locomotion_scale
+                  + 1.0 * r_distance
+                  + 1.0 * r_stand
+                  + 1.0 * r_reg)
+        reward = torch.clamp(reward, min=-10.0)
 
         for k, v in zip(
-            ["track", "contact", "clear", "progress", "phase", "stand", "reg", "total"],
-            [r_track, r_contact, r_clear, r_progress, r_phase, r_stand, r_reg, reward],
+            ["progress", "phase", "distance", "stand", "reg", "total"],
+            [r_progress,  r_phase,  r_distance,  r_stand,  r_reg,  reward],
         ):
             self._ep_rew[k] += v
         return reward
