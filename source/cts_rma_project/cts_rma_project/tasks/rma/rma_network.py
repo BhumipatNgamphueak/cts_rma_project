@@ -21,29 +21,47 @@ _OT_DIM = 37   # proprioceptive obs for GO2
 
 
 class EnvFactorEncoder(nn.Module):
-    """μ: x_t(env_dim) → z(latent_dim)"""
+    """μ: x_t(env_dim) → z(latent_dim)
+
+    The output layer is small-gain orthogonal-initialised (mirrors the CTS
+    teacher encoder) so z≈0 at init: the policy starts as a clean
+    proprioceptive policy and stably learns to exploit z, instead of being
+    hit with a huge unregularised latent (|z|~48) from default init.
+    """
     def __init__(self, env_dim: int = 26, latent_dim: int = 8):
         super().__init__()
+        last = nn.Linear(128, latent_dim)
+        nn.init.orthogonal_(last.weight, gain=0.01)
+        nn.init.constant_(last.bias, 0.0)
         self.net = nn.Sequential(
             nn.Linear(env_dim, 256), nn.ELU(),
             nn.Linear(256, 128),     nn.ELU(),
-            nn.Linear(128, latent_dim),
+            last,
         )
 
     def forward(self, e: torch.Tensor) -> torch.Tensor:
         return self.net(e)
 
 
+def _mlp(in_dim: int, hidden_dims: list, out_dim: int) -> nn.Sequential:
+    """[in_dim] → hidden_dims (ELU between) → out_dim, matching CTS/Baseline."""
+    layers, d = [], in_dim
+    for h in hidden_dims:
+        layers += [nn.Linear(d, h), nn.ELU()]
+        d = h
+    layers.append(nn.Linear(d, out_dim))
+    return nn.Sequential(*layers)
+
+
 class BasePolicy(nn.Module):
     """π: (o_t, z) → a_t  — no prev_action to stay compatible with PPO mini-batch updates."""
-    def __init__(self, action_dim: int = 12, latent_dim: int = 8):
+    def __init__(self, action_dim: int = 12, latent_dim: int = 8,
+                 hidden_dims: list = None):
         super().__init__()
+        if hidden_dims is None:
+            hidden_dims = [512, 256, 128]
         in_dim = _OT_DIM + latent_dim
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, 256), nn.ELU(),
-            nn.Linear(256, 128),    nn.ELU(),
-            nn.Linear(128, action_dim),
-        )
+        self.net = _mlp(in_dim, hidden_dims, action_dim)
         self.log_std = nn.Parameter(torch.zeros(action_dim))
 
     def forward(self, ot: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
@@ -57,13 +75,11 @@ class BasePolicy(nn.Module):
 
 class ValueFunction(nn.Module):
     """V: (o_t, z) → scalar"""
-    def __init__(self, latent_dim: int = 8):
+    def __init__(self, latent_dim: int = 8, hidden_dims: list = None):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(_OT_DIM + latent_dim, 256), nn.ELU(),
-            nn.Linear(256, 128),                  nn.ELU(),
-            nn.Linear(128, 1),
-        )
+        if hidden_dims is None:
+            hidden_dims = [512, 256, 128]
+        self.net = _mlp(_OT_DIM + latent_dim, hidden_dims, 1)
 
     def forward(self, ot: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         return self.net(torch.cat([ot, z], dim=-1))
@@ -88,11 +104,25 @@ class AdaptationModule(nn.Module):
         cnn_out_size = self.cnn(dummy).flatten(1).shape[1]
         self.proj    = nn.Linear(cnn_out_size, latent_dim)
 
-    def forward(self, x_hist: torch.Tensor, a_hist: torch.Tensor) -> torch.Tensor:
+        # Target-standardisation stats for the teacher latent. Phase 2 regresses
+        # the *standardised* teacher latent (otherwise the huge, unregularised
+        # env_encoder output — |z|~48, per-dim std up to 30 — makes MSE collapse
+        # to the constant mean). `forward` de-normalises so the frozen Phase-1
+        # actor still receives raw-scale z. Defaults (0/1) = identity ⇒ old
+        # checkpoints behave exactly as before.
+        self.register_buffer("z_mean", torch.zeros(latent_dim))
+        self.register_buffer("z_std",  torch.ones(latent_dim))
+
+    def core(self, x_hist: torch.Tensor, a_hist: torch.Tensor) -> torch.Tensor:
+        """Raw network output in *standardised* latent space (training target)."""
         B, T, _ = x_hist.shape
         inp     = torch.cat([x_hist, a_hist], dim=-1).view(B * T, -1)
         emb     = self.embed(inp).view(B, T, -1).permute(0, 2, 1)
         return self.proj(self.cnn(emb).flatten(1))
+
+    def forward(self, x_hist: torch.Tensor, a_hist: torch.Tensor) -> torch.Tensor:
+        """Deployment path: de-normalised ẑ in the raw teacher-latent scale."""
+        return self.core(x_hist, a_hist) * self.z_std + self.z_mean
 
 
 class RMAActorCritic(nn.Module):
@@ -111,8 +141,14 @@ class RMAActorCritic(nn.Module):
 
     def __init__(self, num_actor_obs: int, num_critic_obs: int,
                  num_actions: int, env_factor_dim: int = 26,
-                 latent_dim: int = 8, **kwargs):
+                 latent_dim: int = 8,
+                 actor_hidden_dims: list = None,
+                 critic_hidden_dims: list = None, **kwargs):
         super().__init__()
+        if actor_hidden_dims is None:
+            actor_hidden_dims = [512, 256, 128]
+        if critic_hidden_dims is None:
+            critic_hidden_dims = [512, 256, 128]
         self.latent_dim      = latent_dim
         self.action_dim      = num_actions
         self._env_factor_dim = env_factor_dim
@@ -120,8 +156,8 @@ class RMAActorCritic(nn.Module):
         self._teacher_mode   = (num_actor_obs == _OT_DIM + env_factor_dim)
 
         self.env_encoder = EnvFactorEncoder(env_factor_dim, latent_dim)
-        self.policy      = BasePolicy(num_actions, latent_dim)
-        self.value_fn    = ValueFunction(latent_dim)
+        self.policy      = BasePolicy(num_actions, latent_dim, actor_hidden_dims)
+        self.value_fn    = ValueFunction(latent_dim, critic_hidden_dims)
 
         # RSL-RL interface attributes (set by act())
         self.action_mean = None

@@ -227,9 +227,47 @@ def privileged_full_go2(
     )
 
 
-# ── Privileged subsets — for INT-only / EXT-only ablations ────────────────────
-# x_t dimensionality per privileged mode (used by env cfgs and encoder networks).
-PRIV_DIMS = {"FULL": 26, "INT": 16, "EXT": 10}
+# ── Privileged — Terrain heights ──────────────────────────────────────────────
+
+def privileged_terrain_go2(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("height_scanner"),
+    asset_cfg:  SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """
+    Terrain height map relative to robot base z, yaw-aligned.
+    11×7 = 77 samples over 1.0 m × 0.6 m grid.
+    Values ≈ 0 at nominal standing height; positive = bump, negative = hole.
+    """
+    sensor = env.scene.sensors[sensor_cfg.name]
+    asset  = env.scene[asset_cfg.name]
+    base_z = asset.data.root_pos_w[:, 2:3]       # (N, 1)
+    hit_z  = sensor.data.ray_hits_w[..., 2]       # (N, 77)
+    return (base_z - 0.5 - hit_z).clamp(-1.0, 1.0)
+
+
+def privileged_full_terrain_go2(
+    env: ManagerBasedRLEnv,
+    asset_cfg:  SceneEntityCfg = SceneEntityCfg("robot"),
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    height_cfg: SceneEntityCfg = SceneEntityCfg("height_scanner"),
+) -> torch.Tensor:
+    """x^int(16) ⊕ x^ext(10) ⊕ x^terr(77) = 103."""
+    return torch.cat([
+        privileged_internal_go2(env),
+        privileged_external_go2(env, asset_cfg=asset_cfg, sensor_cfg=sensor_cfg),
+        privileged_terrain_go2(env, sensor_cfg=height_cfg, asset_cfg=asset_cfg),
+    ], dim=-1)
+
+
+# ── Privileged subsets — for INT-only / EXT-only / TERR / FULL_T ablations ────
+PRIV_DIMS = {
+    "FULL":   26,
+    "INT":    16,
+    "EXT":    10,
+    "TERR":   77,
+    "FULL_T": 103,
+}
 
 
 def privileged_subset_go2(
@@ -240,15 +278,17 @@ def privileged_subset_go2(
 ) -> torch.Tensor:
     """
     Return the requested privileged subset:
-      FULL → x^int(16) ⊕ x^ext(10) = 26   (identical to privileged_full_go2)
-      INT  → x^int(16)
-      EXT  → x^ext(10)
+      FULL   → x^int(16) ⊕ x^ext(10) = 26
+      INT    → x^int(16)
+      EXT    → x^ext(10)
+      TERR   → x^terr(77)
+      FULL_T → x^int(16) ⊕ x^ext(10) ⊕ x^terr(77) = 103
     """
     m = (mode or "FULL").upper()
-    if m == "INT":
-        return privileged_internal_go2(env)
-    if m == "EXT":
-        return privileged_external_go2(env, asset_cfg=asset_cfg, sensor_cfg=sensor_cfg)
+    if m == "INT":    return privileged_internal_go2(env)
+    if m == "EXT":    return privileged_external_go2(env, asset_cfg=asset_cfg, sensor_cfg=sensor_cfg)
+    if m == "TERR":   return privileged_terrain_go2(env, asset_cfg=asset_cfg)
+    if m == "FULL_T": return privileged_full_terrain_go2(env, asset_cfg=asset_cfg, sensor_cfg=sensor_cfg)
     return privileged_full_go2(env, asset_cfg=asset_cfg, sensor_cfg=sensor_cfg)
 
 

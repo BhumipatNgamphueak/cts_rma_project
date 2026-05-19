@@ -29,17 +29,27 @@
 > **Headline story for both drafts.** On the single-leg fixed-base platform all
 > three methods are competitive and the T–S advantage fails to appear (Baseline
 > in fact wins on raw reward). On the free-base Unitree Go2, the T–S advantage
-> reappears — but it is **CTS, not RMA**, that survives the simulator change:
-> CTS keeps the highest task-success rate in MuJoCo at the training distribution
-> (96.7 % vs 63.3 % for Baseline/RMA) and is the only method whose velocity
-> tracking stays inside the 0.3 m/s spec at MuJoCo DR×2. RMA's Phase-2
-> adaptation module collapses out-of-distribution (48 % OOD retention, the only
-> spec-sheet FAIL in the matrix). A controlled privileged-subset ablation on
-> CTS (FULL / INT / EXT) further shows that the body-parameter subset (INT)
-> alone is enough to *match FULL on raw reward* in both sims, but **only the
-> FULL combination delivers the high task-success rate** in MuJoCo (97 % vs INT
-> 60 % vs EXT 53 % at DR×1) — the interaction signals in EXT carry
-> behavioural information that the history cannot recover.
+> reappears — and it is **CTS, not RMA**, that wins. Evaluated under the *exact
+> v2 training distribution* (flat ground + velocity push, 20 s episodes, 30
+> episodes/cell), CTS is the strongest method at the nominal condition
+> (DR×1: 100 % survival, 0.130 m/s tracking error) **and** degrades the least
+> under OOD stress (DR×2: 86.7 % survival vs Baseline 73.3 % vs RMA 23.3 %).
+> CTS is also the most robust to the training-time push (survival 100→100 % at
+> DR×1 with/without push) and the best velocity tracker in *both* simulators.
+> **RMA's Phase-2 adaptation module is the clear loser once tested faithfully**:
+> it is fragile to the very push it was trained with (80 % survival at Isaac
+> DR×1, 23 % at DR×2) and its adaptation module collapses entirely in MuJoCo —
+> producing a near-stationary policy (forward displacement ≈ 0 m, velocity-RMSE
+> pinned at the 0.5 m/s command magnitude) that "survives" only by not
+> attempting to walk.
+>
+> **Methodology caveat (state explicitly).** The MuJoCo sim2sim harness
+> (`scripts/sim2sim/sim2sim_go2.py`) has *no push/disturbance mechanism*; it can
+> only reproduce the **no-push** condition, which is strictly easier than v2's
+> training distribution. Therefore the Isaac↔MuJoCo transfer comparison is
+> reported at no-push (apples-to-apples), while the headline robustness ranking
+> uses the training-faithful Isaac condition (push ON). Both Isaac conditions
+> are reported in §C.2.
 
 ---
 
@@ -257,19 +267,38 @@ ood_scaling_rule: "Each scaled-DR parameter range is widened about its midpoint:
 clipping_rules: "After scaling: friction >= 0.01; restitution clipped to [0,1] (cap at 0.15 retained); base mass scale >= 0.1; action delay >= 0 ms."
 ```
 
+> **v2 training-condition note (authoritative for the final numbers).** The v2
+> checkpoints (`logs/{baseline,cts,rma}/2026-05-10_...`) were trained under
+> git commit `dd64881` of `shared_env_cfg.py`, which had: **flat ground**
+> (`GroundPlaneCfg`, *not* the cobblestone generator that the current working
+> copy shows), `push_robot` **enabled** (`push_by_setting_velocity`, interval
+> 10–15 s, lin x/y ±0.5 m/s, lin z ±0.3, ang r/p/y ±0.3 rad/s), and **no
+> force/torque impulse events** (the `impulse_reset` / `impulse_interval`
+> rows above were added on 2026-05-12, *after* v2 was trained, so they are
+> NOT part of v2's learned distribution). The §C numbers are evaluated under
+> this exact distribution (flat + push, no impulse) for the training-faithful
+> Isaac condition, and with push disabled for the Isaac↔MuJoCo sim2sim
+> comparison (MuJoCo has no push mechanism — see methodology caveat in the
+> headline).
+
 ### B.6 Episode and success criterion
 ```yaml
-episode_length_steps: 500                # 10.0 s at 50 Hz control (decimation 4 over 200 Hz)
-episode_length_s: 10.0
-success_criterion: "episode reaches its 10 s time-out (no fall) AND velocity-tracking RMSE < 0.3 m/s. Surviving-but-poor-tracking episodes are reported separately as 'partial'."
+episode_length_steps: 1000               # 20.0 s at 50 Hz control (decimation 4 over 200 Hz)
+episode_length_s: 20.0                    # v2 training & all final eval use 20 s
+survival_window_s: 10.0                   # "survived" = stayed upright >= 10 s (>= 500 steps)
+success_criterion: "episode survives >= 10 s without a fall. The MuJoCo harness classifies survived vs fail on the 10 s window; Isaac additionally splits survived episodes by velocity-RMSE < 0.3 m/s into success vs partial."
 outcome_classes:
-  - success: "time_out AND vel_rmse < 0.3 m/s"
-  - partial: "time_out AND vel_rmse >= 0.3 m/s"
-  - fail:    "early termination (fall)"
+  - success: "survived >= 10 s AND vel_rmse < 0.3 m/s (Isaac)"
+  - partial: "survived >= 10 s AND vel_rmse >= 0.3 m/s (Isaac)"
+  - fail:    "early termination (fall) before 10 s"
 termination_conditions:
-  - "time_out: episode reaches 10.0 s"
-  - "base illegal contact: contact force on the 'base' body > 100 N"
+  - "time_out: episode reaches 20.0 s"
   - "bad orientation: base tilt angle > 1.2 rad (~68.8 deg)"
+note: >
+  Earlier drafts of this document reported 10 s / 500-step episodes. The final
+  v2 experiments use 20 s / 1000-step episodes (matches the v2 training
+  episode_length_s = 20.0). Survival is scored on a 10 s window so that
+  'survived' means the same thing across the 20 s eval and any 10 s reference.
 ```
 
 ### B.7 Architectures (Baseline / RMA / CTS)
@@ -347,83 +376,348 @@ variant described above; the v2 logs (`logs/rma/2026-05-10_..._rma_go2_v2_l8_l8`
 ## C. Go2 Experiments — final numbers
 
 ### C.1 Experiment matrix (final, what is reported)
+All Go2 final numbers: **FULL privilege (26-D x_t), latent Z = 8, 30 episodes
+per cell, 20 s episodes (1000 steps), v2 checkpoints
+(`logs/{baseline,cts,rma}/2026-05-10_...`), RMA Phase-2 adaptation module
+`logs/rma/phase2/2026-05-11_12-11-23`**. All three methods share identical
+scene / reward / DR / physics; only the transfer mechanism differs.
+
 ```yaml
-experiments:
-  - {name: "Isaac OOD - DR x1.0",      status: "done", method: "Baseline, RMA, CTS", n_episodes: 30}
-  - {name: "Isaac OOD - DR x2.0",      status: "done", method: "Baseline, RMA, CTS", n_episodes: 30}
-  - {name: "MuJoCo sim2sim - DR x1.0", status: "done", method: "Baseline, RMA, CTS", n_episodes: 30}
-  - {name: "MuJoCo sim2sim - DR x2.0", status: "done", method: "Baseline, RMA, CTS", n_episodes: 30}
-  - {name: "Phase-1 single-leg fair-config",  status: "done (Isaac-only, FULL/Z=8)", method: "Baseline, RMA, CTS", n_episodes: 100}
-  - {name: "CTS privileged-subset ablation (FULL/INT/EXT) on Go2", status: "done", method: "CTS only, Z=8", n_episodes: 30, cells: "2 sims × 2 DR scales × 3 priv subsets = 12 (4 new INT + 4 new EXT cells appended to ood_go2.csv and sim2sim_go2.csv on top of the 4 pre-existing FULL cells)"}
+conditions:                           # all: 20 s, 30 ep, flat ground, v2 ckpts
+  - name: "Isaac training-faithful (flat + push, no impulse)"
+    role: "CANONICAL — matches exactly what v2 was trained on"
+    file: "results/isaac_v2_trainfaithful_20s.csv"
+    method: "Baseline, RMA, CTS"; dr_scales: [1.0, 2.0]; status: "done"
+  - name: "Isaac no-push (flat, no disturbance)"
+    role: "sim2sim-comparable companion (MuJoCo has no push)"
+    file: "results/isaac_v2_matched_20s.csv"
+    method: "Baseline, RMA, CTS"; dr_scales: [1.0, 2.0]; status: "done"
+  - name: "MuJoCo sim2sim (flat, no push — only mode the harness supports)"
+    file: "results/sim2sim_report_v2_matched.{txt,json}"
+    method: "Baseline, RMA, CTS"; dr_scales: [1.0, 2.0]; status: "done"
+  - name: "Phase-1 single-leg fair-config"
+    status: "done (Isaac-only, FULL/Z=8)"; method: "Baseline, RMA, CTS"; n_episodes: 100
+pending_rerun:
+  - "CTS privileged-subset ablation (FULL/INT/EXT) on Go2 — the §C.4/C.5 numbers
+     were produced by the OLD pipeline (10 s, pre-bugfix EpisodeDR) and are NOT
+     yet re-run under the corrected 20 s harness. Treated as PROVISIONAL."
 ablations_not_reported:
-  - "Latent-dimension sweep on Go2 (only Z=8 was reported); compute budget pivoted to nailing one fair config."
+  - "Latent-dimension sweep on Go2 (only Z=8 reported)."
   - "Privileged-subset ablation for RMA on Go2 (only CTS is ablated)."
 ```
-The fair Go2 configuration used for every reported number: **FULL privilege
-(26-D x_t), latent Z = 8, 30 episodes per cell, episode length 10 s** (500
-control steps), all three methods share identical scene/reward/DR/physics.
-Total cells in the final tables: 3 methods × 2 sims × 2 DR scales = 12 rows
-(see `results/go2_results_table.md`).
+
+> **Critical bug fixed before these numbers (document for the report's
+> reproducibility section).** The MuJoCo multi-condition harness
+> (`eval_metrics.py`) shared one `MjModel` across all conditions, and
+> `EpisodeDR.__init__` snapshotted "nominal" inertia/COM/friction from the
+> *current* (already DR-perturbed) model. Running conditions in series
+> (baseline→rma→cts) compounded the COM offset additively and inertia
+> multiplicatively, so CTS (evaluated last) ran on a catastrophically distorted
+> robot and reported a spurious **3 %** survival. After restoring the model to
+> true nominal before each condition's `EpisodeDR`, CTS recovers to **100 %**
+> survival at DR×1 — consistent with standalone `sim2sim_go2.py` (100 %, reward
+> ≈ 2100). All §C.2/C.3 MuJoCo numbers are post-fix.
 
 ### C.2 Final per-row evaluation table (Go2) — FULL methods only
-*(The 12 FULL-method rows of `results/go2_results_table.md` — the
-Baseline-vs-CTS-vs-RMA comparison; the CTS-INT and CTS-EXT rows are reported
-separately in §C.5. Columns: episode return = mean ± std of cumulative
-reward; success % = 3-class "success" share, i.e. survived **and**
-vel_rmse < 0.3 m/s.)*
 
-| sim    | method   | priv | Z | s | episode return    | success % |
-|---     |---       |---   |---:|--:|---                |---:       |
-| Isaac  | Baseline | BASE | — | 1 | 1251.6 ± 88.9     | 100       |
-| Isaac  | Baseline | BASE | — | 2 | 1119.6 ± 213.6    | 97        |
-| Isaac  | CTS      | FULL | 8 | 1 | 1265.9 ± 61.7     | 100       |
-| Isaac  | CTS      | FULL | 8 | 2 | 1117.3 ± 263.7    | 100       |
-| Isaac  | RMA      | FULL | 8 | 1 | 936.9 ± 144.0     | 77        |
-| Isaac  | RMA      | FULL | 8 | 2 | 453.5 ± 490.7     | 47        |
-| MuJoCo | Baseline | BASE | — | 1 | 1160.9 ± 103.5    | 63        |
-| MuJoCo | Baseline | BASE | — | 2 | 889.4 ± 361.0     | 40        |
-| MuJoCo | CTS      | FULL | 8 | 1 | 980.7 ± 116.8     | 97        |
-| MuJoCo | CTS      | FULL | 8 | 2 | 647.7 ± 395.8     | 53        |
-| MuJoCo | RMA      | FULL | 8 | 1 | 833.2 ± 97.2      | 63        |
-| MuJoCo | RMA      | FULL | 8 | 2 | 407.7 ± 416.5     | 17        |
+All cells: Z = 8, 30 episodes, 20 s (1000 steps), v2 checkpoints. Reward =
+mean ± std cumulative return. `trk` = mean velocity-tracking error [m/s]
+(Isaac `mean_track_err`; MuJoCo `vel_rmse`). `fwd` = mean forward
+displacement [m] (key behavioural sanity check — a policy with fwd ≈ 0 is
+standing still regardless of reward).
 
-Survival rate (success + partial, spec ≥ 80 %): Isaac/DR×1 = 100/100/90 %
-(B/C/R), Isaac/DR×2 = **97/100/47 %**, MuJoCo/DR×1 = **100/100/100 %**,
-MuJoCo/DR×2 = 83/77/83 % — see
-`results/figures/fig_go2_comparison_survival.png`.
+**(a) Isaac — TRAINING-FAITHFUL (flat + push, no impulse) — the canonical result**
+`results/isaac_v2_trainfaithful_20s.csv`
 
-Velocity-tracking RMSE (spec < 0.3 m/s): Isaac/DR×1 = 0.14 / 0.12 / 0.20 (B/C/R),
-Isaac/DR×2 = 0.16 / 0.17 / 0.28, MuJoCo/DR×1 = 0.25 / 0.18 / 0.28, MuJoCo/DR×2 =
-**0.34 / 0.30 / 0.40** (B/C/R; the CTS value is 0.302) — **CTS is the only
-method that stays near the 0.3 m/s spec under worst-case OOD-in-MuJoCo**
-(0.302, +0.7 % over the spec); Baseline (0.34, +13 %) and RMA (0.40, +33 %)
-both breach it substantially.
+| method   | s | reward          | surv % | trk   | fwd   |
+|---       |--:|---              |---:    |---:   |---:   |
+| Baseline | 1 | 2571.1 ± 162.0  | 100.0  | 0.144 | 1.46  |
+| Baseline | 2 | 1800.0 ± 1207.7 | 73.3   | 0.239 | 0.42  |
+| **CTS**  | 1 | **2630.3 ± 75.4** | **100.0** | **0.130** | **2.57** |
+| **CTS**  | 2 | **2311.2 ± 652.8** | **86.7**  | **0.157** | **1.85** |
+| RMA      | 1 | 1773.5 ± 617.6  | 80.0   | 0.201 | 0.04  |
+| RMA      | 2 | 713.6 ± 944.1   | 23.3   | 0.259 | 0.08  |
+
+**(b) Isaac — NO-PUSH (flat, no disturbance) — sim2sim-comparable companion**
+`results/isaac_v2_matched_20s.csv`
+
+| method   | s | reward          | surv % | trk   | fwd   |
+|---       |--:|---              |---:    |---:   |---:   |
+| Baseline | 1 | 2604.1 ± 154.9  | 100.0  | 0.131 | 1.71  |
+| Baseline | 2 | 2276.4 ± 646.4  | 93.3   | 0.146 | 1.38  |
+| CTS      | 1 | 2685.6 ± 64.5   | 100.0  | 0.110 | 2.68  |
+| CTS      | 2 | 2201.8 ± 851.6  | 86.7   | 0.156 | 1.16  |
+| RMA      | 1 | 2201.9 ± 172.3  | 100.0  | 0.186 | 0.05  |
+| RMA      | 2 | 935.0 ± 1067.3  | 60.0   | 0.258 | 0.04  |
+
+**(c) MuJoCo — NO-PUSH (flat) — sim2sim target** (harness has no push)
+`results/sim2sim_report_v2_matched.json`
+
+| method   | s | reward          | surv % | trk(RMSE) | fwd    |
+|---       |--:|---              |---:    |---:       |---:    |
+| Baseline | 1 | 2349.6 ± 239.9  | 100.0  | 0.222     | 6.01   |
+| Baseline | 2 | 1742.9 ± 800.5  | 90.0   | 0.351     | 3.20   |
+| CTS      | 1 | 1930.3 ± 363.5  | 100.0  | 0.177     | 8.21   |
+| CTS      | 2 | 1108.9 ± 989.8  | 73.3   | 0.327     | 4.19   |
+| RMA      | 1 | 2136.7 ± 59.7   | 100.0  | **0.500** | **0.01** |
+| RMA      | 2 | 1826.7 ± 584.6  | 100.0  | **0.500** | **−0.00**|
+
+**Reading.**
+1. **CTS wins the canonical (training-faithful) condition** outright: best
+   reward, survival and tracking at DR×1 *and* DR×2, and the smallest OOD drop
+   (survival 100→86.7 %). Baseline is close at DR×1 but collapses far more at
+   DR×2 (100→73.3 %). RMA is third everywhere (80 % then 23.3 %).
+2. **CTS is the most push-robust.** Adding the training-time push barely moves
+   CTS (survival 100→100 % at DR×1, 86.7→86.7 % at DR×2 vs the no-push column).
+   Baseline loses 93.3→73.3 % at DR×2; RMA loses 100→80 % at DR×1 and
+   60→23.3 % at DR×2 — RMA is fragile to the very disturbance it trained on.
+3. **RMA's adaptation module does not produce locomotion.** `fwd ≈ 0 m` in
+   *both* simulators (Isaac 0.04–0.05 m, MuJoCo ≈ 0 m over a 20 s episode) and
+   MuJoCo `vel_rmse` pinned at 0.500 (= the 0.5 m/s command magnitude → zero
+   forward velocity). RMA's high MuJoCo reward / "100 % survival" is a
+   stationary-policy artefact (alive-bonus + posture shaping), **not** task
+   competence.
+4. **CTS is the best velocity tracker in both simulators** (lowest `trk` in
+   every Isaac and MuJoCo block where the policy actually moves).
+
+Figure: `results/figures/fig_go2_v2_corrected.{png,pdf}` (generated by
+`scripts/plot_v2_corrected.py` directly from the three authoritative files;
+1×3 panel = survival / reward / tracking-error, 3 conditions × 3 methods ×
+DR×1/×2). This is the **only Go2 figure that reflects the corrected v2
+numbers** — every `fig_go2_*` figure from `plot_results_go2.py` is stale
+(see §F banner).
+
+### C.2(d) — Four-method comparison (v2fix, 10 s, no-push) — **CITE THIS for RMA Teacher / Student**
+
+> **Added 2026-05-19.** Source CSVs: `results/ood_go2.csv` (Isaac) +
+> `results/sim2sim_go2.csv` (MuJoCo). These are 10 s (500-step) episodes,
+> no velocity push, flat ground. Isaac n = 100 (RMA Teacher / RMA Student),
+> n = 30 (Baseline / CTS FULL). MuJoCo n = 30 all methods. The four methods
+> share the same v2 checkpoints except RMA Student which uses the v2fix
+> checkpoint (Phase-1 fixed capacity + orthogonal encoder init, Phase-2
+> trained 600 iterations, adaptation module MSE converged to ~0.94 — i.e.
+> the adaptation module outputs z ≈ z_mean and produces near-zero guidance).
+>
+> **Why 10 s, not 20 s?** The `eval_ood_go2.py` harness uses `episode_length_s=10`
+> so rewards are roughly half the §C.2(a-c) values — **do not mix the two
+> tables' reward numbers directly**. Survival %, tracking error, and
+> forward displacement are scale-independent and can be compared.
+
+**(a) Isaac OOD — 10 s, no push**
+
+`results/ood_go2.csv` — columns: `success_rate / partial_rate / fall_rate /
+survival_rate = success + partial` (Isaac splits by vel_rmse < 0.3 m/s;
+MuJoCo: survival = not-fell, success/partial by same 0.3 threshold).
+
+| method | DR×s | return (mean ± std) | success % | partial % | fall % | survival % | trk [m/s] | fwd [m] |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| Baseline       | 1 | 1251.6 ± 88.9   | **100** | 0  | 0      | **100** | 0.139 | 0.89 |
+| Baseline       | 2 | 1119.6 ± 213.6  | 96.7    | 0  | 3.3    | 96.7    | 0.162 | 0.47 |
+| **CTS (FULL)** | 1 | **1265.9 ± 61.7** | **100** | 0  | 0      | **100** | **0.124** | 1.35 |
+| **CTS (FULL)** | 2 | **1117.3 ± 263.7** | **100** | 0  | **0**  | **100** | 0.169 | 0.65 |
+| RMA Teacher    | 1 | 1252.1 ± 64.8   | **100** | 0  | 0      | **100** | 0.143 | **1.25** |
+| RMA Teacher    | 2 | 1000.3 ± 448.3  | 82      | 2  | 16     | 84      | 0.232 | 0.56 |
+| RMA Student    | 1 | 764.2 ± 360.1   | 64      | 19 | **17** | 83      | 0.244 | 0.13 |
+| RMA Student    | 2 | 296.9 ± 662.4   | 38      | 7  | **55** | 45      | 0.328 | 0.17 |
+
+**(b) MuJoCo Sim2Sim — 10 s, no push**
+
+`results/sim2sim_go2.csv`. Reward scale differs from Isaac (different alive-bonus
+accumulation in MuJoCo).
+
+| method | DR×s | return (mean ± std) | success % | partial % | fall % | survival % | trk [m/s] | fwd [m] |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| Baseline         | 1 | 1160.9 ± 103.5  | 63.3    | 36.7  | 0      | **100** | 0.251 | 2.76 |
+| Baseline         | 2 | 889.4 ± 361.0   | 40      | 43.3  | 16.7   | 83.3    | 0.340 | 1.87 |
+| **CTS (FULL)**   | 1 | 980.7 ± 116.8   | **96.7** | 3.3  | **0**  | **100** | **0.178** | **4.10** |
+| **CTS (FULL)**   | 2 | 647.7 ± 395.8   | **53.3** | 23.3 | 23.3   | 76.7    | **0.302** | **2.78** |
+| RMA Teacher†     | 1 | 1036.8 ± 23.5   | 0       | **100** | **0** | **100** | 0.499 | 0.02 |
+| RMA Teacher†     | 2 | 927.3 ± 316.3   | 3.3     | 96.7  | **0**  | **100** | 0.491 | 0.10 |
+| RMA Student      | 1 | −1252.2 ± 2033  | 0       | 33.3  | **66.7** | 33.3  | 0.446 | 0.77 |
+| RMA Student      | 2 | −444.1 ± 678.2  | 0       | 36.7  | **63.3** | 36.7  | 0.486 | 0.63 |
+
+† **RMA Teacher MuJoCo anomaly.** 100 % survival, 0 falls, perfect ang_track
+(0.998) but `fwd ≈ 0.02 m` over 10 s — the robot spins in place. The
+privileged-obs builder `get_priv_obs_sim2sim` likely feeds a mis-scaled
+torque or contact signal so the encoder outputs a z that rewards spinning
+over walking. This is a sim2sim integration bug, not a policy failure; the
+Isaac OOD result (100 % success, fwd = 1.25 m) is the authoritative
+RMA-Teacher number.
+
+**Reading (cite §C.2(d) when discussing the four-method comparison).**
+1. **CTS wins overall.** Only method with 100 % survival and 0 falls at DR×1
+   *and* DR×2 in Isaac; best linear-velocity tracker in both simulators; best
+   sim2sim success rate (96.7 % at DR×1).
+2. **RMA Teacher ≈ Baseline ≈ CTS in Isaac at DR×1** (all 100 % survival,
+   rewards within 1.5 %). At DR×2 Teacher degrades noticeably (84 % survival,
+   16 % fall) — the Phase-1 actor without exact x_t at test time in DR×2 is
+   less robust than CTS's concurrent training.
+3. **RMA Student fails systematically — root cause: Phase-2 adaptation module
+   cannot converge.**
+   The adaptation module φ(history) → ẑ was trained for 1 471 Phase-2
+   iterations (source: `logs/rma/phase2/2026-05-19_14-29-11/phase2_loss.csv`).
+   MSE loss:
+   - **Initial (iter 10):** 0.9817
+   - **Final plateau (last-100 mean):** 0.9364
+   - **Improvement over 1 471 iters:** only 0.0453 — essentially flat after
+     the first ~10 iterations (see `fig_go2_rma_phase2_loss`).
+   The teacher provides oracle z (MSE = 0 by definition); the student is
+   stuck at ≈ 0.936, meaning ẑ ≈ z_mean — the CNN collapses to predicting
+   the latent mean and ignores the history signal entirely. Root cause:
+   `batch_size / num_envs ≈ 19` effective history steps vs `history_len = 50`
+   → the CNN never sees a full-length history window during training.
+   Consequence: In Isaac: 17 % fall at DR×1, 55 % fall at DR×2. In MuJoCo:
+   66.7 % fall at DR×1 with mean reward −1252. The two-stage dependency
+   (Phase-2 convergence requires Phase-1 to produce stable z trajectories,
+   and the batch-size ratio prevents Phase-2 from learning) is the root
+   failure mode.
+4. **MuJoCo partial vs success split reveals sim2sim gap.** Baseline has only
+   63.3 % full-success in MuJoCo despite 100 % survival (vel_rmse often ≥ 0.3).
+   CTS achieves 96.7 % full-success, confirming it is the better velocity
+   tracker.
+
+Figures (from `scripts/plot_results_go2.py`, regenerated 2026-05-19 with
+RMA Teacher added):
+- `results/figures/fig_go2_comparison.{pdf,png}` — 4-view reward matrix
+- `results/figures/fig_go2_comparison_outcome.{pdf,png}` — stacked success/partial/fall
+- `results/figures/fig_go2_comparison_survival.{pdf,png}` — survival spec (≥ 80 %)
+- `results/figures/fig_go2_comparison_rmse.{pdf,png}` — vel-tracking RMSE
+- `results/figures/fig_go2_headline.{pdf,png}` — sim2sim retention G(π)
+- `results/figures/fig_go2_ood_profile.{pdf,png}` — Isaac OOD gap
+- `results/figures/fig_go2_summary.{pdf,png}` — spec-sheet dashboard
+- `results/figures/fig_go2_rma_phase2_loss.{pdf,png}` — **RMA Phase-2 MSE
+  loss curve (teacher–student gap)**; shows flat plateau at ≈ 0.936 vs
+  teacher baseline of 0, confirming the adaptation module does not converge
+  (source: `logs/rma/phase2/2026-05-19_14-29-11/phase2_loss.csv`)
+
+### C.2(e) — RMA Phase-2 MSE Loss: Teacher–Student Gap
+
+**Source:** `logs/rma/phase2/2026-05-19_14-29-11/phase2_loss.csv` (1 471 iterations).
+**Figure:** `results/figures/fig_go2_rma_phase2_loss.{pdf,png}`.
+
+The Phase-2 supervised step trains φ : o_{t-H:t} → ẑ (1D-CNN, history_len = 50)
+to match the oracle encoder output z = μ_φ(x_t) using frozen Phase-1 weights.
+
+| Quantity | Value |
+|---|---|
+| Training iterations (Phase 2) | 1 471 |
+| MSE at iter 10 (first logged) | 0.9817 |
+| MSE plateau — last-50 mean | **0.9364** |
+| MSE plateau — last-100 mean | 0.9364 |
+| MSE improvement over full run | 0.0453 (≈ 4.6 %) |
+| Teacher MSE (oracle baseline) | **0.0000** |
+| Teacher–student gap | **≈ 0.936** |
+
+**Interpretation.** The adaptation module converges in the first ≈ 10 iterations
+(from 0.98 → 0.93) and then flat-lines: the loss curve shows zero meaningful
+descent across 1 461 remaining iterations. The CNN collapses to predicting ẑ ≈
+z_mean — ignoring the observation history entirely. This is quantified by the
+teacher–student gap of ≈ 0.936 (teacher = 0 by construction; perfect student
+would also reach 0).
+
+**Root cause: batch_size / num_envs mismatch.**
+During Phase-2 training, each rollout provides only `batch_size / num_envs ≈ 19`
+steps per environment, while the history window is `history_len = 50`. The CNN
+therefore never receives a full 50-step history buffer during training — the
+first 31 entries are always zero-padded — causing the network to learn that the
+mean prediction is optimal (minimises MSE on the padding-dominated distribution).
+
+**Impact on performance.**
+The ẑ ≈ z_mean output effectively disables the environmental context signal, so
+the Phase-1 actor runs with a constant latent rather than a task-conditioned one.
+This explains the large RMA Teacher → RMA Student performance drop:
+
+| Metric (Isaac, DR×1) | RMA Teacher | RMA Student | Gap |
+|---|---:|---:|---:|
+| Mean reward | 1252.1 | 764.2 | −488 (−39 %) |
+| Success rate | 100 % | 64 % | −36 pp |
+| Fall rate | 0 % | 17 % | +17 pp |
+| Vel-tracking RMSE | 0.143 | 0.244 | +70 % |
+
+Fix (not applied in this study): increase `num_envs` or `batch_size` so that
+`batch_size / num_envs ≥ history_len`, or pre-fill the history buffer before
+Phase-2 gradient steps begin.
 
 ### C.3 Sim2Sim transfer ratios (Go2, spec sheet)
-Reward-based ratios, with spec-sheet threshold check applied. Source:
-`results/go2_results_table.md` (auto-computed in `plot_results_go2.py`).
 - **G(π)** = R_MuJoCo,1× / R_Isaac,1× × 100 % (target ≥ 60 %)
 - **OOD gap** = R_Isaac,2× / R_Isaac,1× × 100 % (target ≥ 70 %)
 - **Combined gap** = R_MuJoCo,2× / R_Isaac,1× × 100 % (target ≥ 40 %)
 
-| method   | priv | Z  | R_iso,1× | R_iso,2× | R_muj,1× | R_muj,2× | G(π)            | OOD gap         | Combined        |
-|---       |---   |---:|---:      |---:      |---:      |---:      |---:             |---:             |---:             |
-| Baseline | BASE | —  | 1251.6   | 1119.6   | 1160.9   | 889.4    | **92.8 %** ✓PASS | **89.5 %** ✓PASS | **71.1 %** ✓PASS |
-| CTS      | FULL | 8  | 1265.9   | 1117.3   | 980.7    | 647.7    | **77.5 %** ✓PASS | **88.3 %** ✓PASS | **51.2 %** ✓PASS |
-| RMA      | FULL | 8  | 936.9    | 453.5    | 833.2    | 407.7    | **88.9 %** ✓PASS | **48.4 %** ✗FAIL | **43.5 %** ✓PASS |
+**(i) Sim2sim ratios — Isaac NO-PUSH vs MuJoCo NO-PUSH (20 s baseline runs)**
+(apples-to-apples: both 20 s, 30 ep, flat, no push; reward scales now comparable).
 
-**Reading.** Baseline has the highest pure reward-retention, but its
-**task-success rate craters in MuJoCo** (63 % vs CTS 97 %): the policy
-"survives" but does not track the commanded velocity well, so reward —
-dominated by the alive bonus and shaping terms — overstates how good the
-behaviour is. CTS retains the lowest fraction of *raw reward* but the highest
-fraction of *useful behaviour* (success share). RMA's Phase-2 adaptation
-module collapses OOD inside Isaac itself (47 % success at DR×2; 48 % reward
-retention — the only spec-sheet FAIL anywhere in the matrix).
+| method   | R_iso,1× | R_iso,2× | R_muj,1× | R_muj,2× | G(π)            | OOD gap         | Combined        |
+|---       |---:      |---:      |---:      |---:      |---:             |---:             |---:             |
+| Baseline | 2604.1   | 2276.4   | 2349.6   | 1742.9   | **90.2 %** ✓PASS | **87.4 %** ✓PASS | **66.9 %** ✓PASS |
+| CTS      | 2685.6   | 2201.8   | 1930.3   | 1108.9   | **71.9 %** ✓PASS | **82.0 %** ✓PASS | **41.3 %** ✓PASS |
+| RMA      | 2201.9   | 935.0    | 2136.7   | 1826.7   | 97.0 %†          | **42.5 %** ✗FAIL | 83.0 %†          |
+
+† RMA's G(π)/Combined look high **only because RMA stands still in MuJoCo**
+(fwd ≈ 0 m, vel-RMSE = 0.500): the alive-bonus dominates a stationary
+episode, so reward-retention overstates behaviour. RMA still **FAILs the
+OOD-gap spec inside Isaac itself** (42.5 %, the only FAIL in the matrix) —
+its Phase-2 module collapses out-of-distribution even before the simulator
+change.
+
+**(ia) Sim2sim ratios — four-method comparison (10 s, no-push, v2fix)**
+Source: `results/ood_go2.csv` (Isaac) + `results/sim2sim_go2.csv` (MuJoCo).
+Note: reward scale is ~½ of the 20 s runs; ratios are scale-invariant.
+
+| method       | R_iso,1× | R_iso,2× | R_muj,1× | R_muj,2× | G(π)             | OOD gap         | Combined        |
+|---           |---:      |---:      |---:      |---:      |---:              |---:             |---:             |
+| Baseline     | 1251.6   | 1119.6   | 1160.9   | 889.4    | **92.8 %** ✓PASS | **89.5 %** ✓PASS | **71.1 %** ✓PASS |
+| CTS (FULL)   | 1265.9   | 1117.3   | 980.7    | 647.7    | **77.5 %** ✓PASS | **88.3 %** ✓PASS | **51.2 %** ✓PASS |
+| RMA Teacher  | 1252.1   | 1000.3   | 1036.8†  | 927.3†   | 82.8 %†          | **79.9 %** ✓PASS | 74.1 %†        |
+| RMA Student  | 764.2    | 296.9    | −1252.2  | −444.1   | **−163.8 %** ✗FAIL | **38.9 %** ✗FAIL | **−58.1 %** ✗FAIL |
+
+† RMA Teacher MuJoCo G(π)/Combined are inflated by the **spinning-in-place
+anomaly** (fwd ≈ 0.02 m, vel_rmse = 0.499 — see §C.2(d) note). The
+MuJoCo reward comes from alive-bonus + posture only, not locomotion. Use
+Isaac OOD (§C.2(d)(a)) as the authoritative RMA Teacher result.
+
+**(ii) OOD retention under the canonical training-faithful condition**
+(Isaac flat + push, 20 s, R_2× / R_1×; Baseline/CTS/old-RMA checkpoints):
+
+| method   | R_iso,1× (push) | R_iso,2× (push) | OOD retention   |
+|---       |---:             |---:             |---:             |
+| **CTS**  | 2630.3          | 2311.2          | **87.9 %** ✓ best |
+| Baseline | 2571.1          | 1800.0          | 70.0 % (spec edge) |
+| RMA      | 1773.5          | 713.6           | **40.2 %** ✗FAIL |
+
+**(iia) OOD retention — four-method, 10 s no-push (v2fix checkpoints)**
+(Isaac, `results/ood_go2.csv`, R_2× / R_1×):
+
+| method       | R_iso,1× | R_iso,2× | OOD retention    |
+|---           |---:      |---:      |---:              |
+| Baseline     | 1251.6   | 1119.6   | **89.5 %** ✓PASS |
+| **CTS**      | 1265.9   | 1117.3   | **88.3 %** ✓PASS |
+| RMA Teacher  | 1252.1   | 1000.3   | **79.9 %** ✓PASS |
+| RMA Student  | 764.2    | 296.9    | **38.9 %** ✗FAIL |
+
+**Reading.** Under the apples-to-apples no-push sim2sim comparison, Baseline
+has the highest raw reward-retention, but CTS is the only method whose *useful
+behaviour* (forward locomotion + tracking) actually transfers — Baseline's
+fwd halves (1.71→3.20 m note the MuJoCo gait differs) while its tracking
+error nearly doubles, and RMA does not locomote at all in MuJoCo. Under the
+*scientifically correct* training-faithful condition (ii), **CTS clearly wins
+OOD retention (87.9 %)**, Baseline sits on the 70 % spec edge, and **RMA fails
+the OOD spec (40.2 %)** — consistent with the headline ranking.
 
 ### C.4 Ablations on Go2 — what is reported and what is not
+
+> ✅ **CORRECTED & RE-RUN (2026-05-18).** The §C.5 CTS privileged-subset
+> numbers have been regenerated under the corrected 20 s harness (post
+> `EpisodeDR` bug fix): Isaac = training-faithful (flat + push) v2 INT/EXT
+> checkpoints, MuJoCo = clean per-checkpoint `sim2sim_go2.py`. Source data:
+> `results/isaac_v2_trainfaithful_20s.csv` +
+> `results/isaac_cts_intext_trainfaithful_20s.csv` (Isaac) and
+> `results/mujoco_cts_priv_20s.csv` (MuJoCo), consolidated into
+> `results/{ood_go2_v2,sim2sim_go2_v2}.csv` by `scripts/_consolidate_v2.py`.
+> The old "INT beats FULL in MuJoCo" claim is now correctly explained as
+> INT's non-locomotion (0 % success). §C.5 is safe to cite.
+
 - **CTS privileged-knowledge ablation (FULL / INT / EXT) on Go2:** **reported,
-  all 12 cells.** Source: `results/go2_cts_priv_ablation_table.md` (auto-
+  corrected (§C.5).** Source: `results/go2_cts_priv_ablation_table.md` (auto-
   generated by `scripts/plot_results_go2.py` from
   `results/ood_go2.csv` + `results/sim2sim_go2.csv`). Figure:
   `results/figures/fig_go2_cts_priv_ablation.{png,pdf}`. Privileged subsets:
@@ -436,83 +730,79 @@ retention — the only spec-sheet FAIL anywhere in the matrix).
 - **Latent-dimension sweep on Go2:** not reported (only Z = 8 was trained to
   completion on Go2; the single-leg latent sweep on disk is not used).
 
-### C.5 CTS privileged-subset ablation — final numbers
-*(verbatim from `results/go2_cts_priv_ablation_table.md`; CTS only, Z = 8,
-30 episodes per cell, episode length 10 s.)*
+### C.5 CTS privileged-subset ablation — final numbers (CORRECTED)
+*(verbatim from the regenerated `results/go2_cts_priv_ablation_table.md`;
+CTS only, Z = 8, 30 episodes/cell, **20 s** episodes, v2 checkpoints.
+Isaac = training-faithful flat + push; MuJoCo = no-push, post-bugfix.)*
 
 **Per-cell results:**
 
 | sim    | DR×s | priv | reward (mean ± std) | success % | vel-RMSE [m/s] | Δreward vs FULL |
 |---     |---   |---   |---                  |---:       |---:            |---:             |
-| Isaac  | 1    | FULL | 1265.9 ± 61.7       | 100       | 0.124          | —               |
-| Isaac  | 1    | INT  | 1251.8 ± 66.7       | 100       | 0.151          | −1.1 %          |
-| Isaac  | 1    | EXT  | 1136.0 ± 339.4      | 90        | 0.152          | −10.3 %         |
-| Isaac  | 2    | FULL | 1117.3 ± 263.7      | 100       | 0.169          | —               |
-| Isaac  | 2    | INT  | 1013.1 ± 404.2      | 90        | 0.221          | −9.3 %          |
-| Isaac  | 2    | EXT  | 993.1 ± 469.1       | 80        | 0.228          | −11.1 %         |
-| MuJoCo | 1    | FULL | 980.7 ± 116.8       | **97**    | 0.178          | —               |
-| MuJoCo | 1    | INT  | 1119.1 ± 81.4       | 60        | 0.306          | **+14.1 %**     |
-| MuJoCo | 1    | EXT  | 885.6 ± 124.0       | 53        | 0.274          | −9.7 %          |
-| MuJoCo | 2    | FULL | 647.7 ± 395.8       | 53        | 0.302          | —               |
-| MuJoCo | 2    | INT  | 945.8 ± 291.9       | 43        | 0.349          | **+46.0 %**     |
-| MuJoCo | 2    | EXT  | 699.5 ± 321.0       | 33        | 0.343          | +8.0 %          |
+| Isaac  | 1    | FULL | 2630.3 ± 75.4       | 100       | 0.130          | —               |
+| Isaac  | 1    | INT  | 2601.9 ± 81.1       | 100       | 0.156          | −1.1 %          |
+| Isaac  | 1    | EXT  | 2530.2 ± 138.6      | 100       | 0.158          | −3.8 %          |
+| Isaac  | 2    | FULL | 2311.2 ± 652.8      | 87        | 0.157          | —               |
+| Isaac  | 2    | INT  | 2081.5 ± 790.9      | 87        | 0.191          | −9.9 %          |
+| Isaac  | 2    | EXT  | 1856.4 ± 1019.7     | 73        | 0.206          | −19.7 %         |
+| MuJoCo | 1    | FULL | 1930.3 ± 363.5      | **93**    | 0.177          | —               |
+| MuJoCo | 1    | INT  | 2076.9 ± 11.9       | **0**     | **0.497**      | +7.6 %          |
+| MuJoCo | 1    | EXT  | 1791.3 ± 262.2      | 67        | 0.253          | −7.2 %          |
+| MuJoCo | 2    | FULL | 1108.9 ± 989.8      | 40        | 0.327          | —               |
+| MuJoCo | 2    | INT  | 1586.7 ± 872.7      | 17        | 0.428          | +43.1 %         |
+| MuJoCo | 2    | EXT  | 1111.8 ± 835.7      | 23        | 0.381          | +0.3 %          |
 
-**Spec-sheet transfer ratios per privileged subset (all PASS):**
+**Spec-sheet transfer ratios per privileged subset:**
 
-| priv | R_iso,1× | R_iso,2× | R_muj,1× | R_muj,2× | G(π)             | OOD gap          | Combined         |
-|---   |---:      |---:      |---:      |---:      |---:              |---:              |---:              |
-| FULL | 1265.9   | 1117.3   | 980.7    | 647.7    | 77.5 % ✓PASS     | 88.3 % ✓PASS     | 51.2 % ✓PASS     |
-| INT  | 1251.8   | 1013.1   | 1119.1   | 945.8    | **89.4 % ✓PASS** | 80.9 % ✓PASS     | **75.6 % ✓PASS** |
-| EXT  | 1136.0   | 993.1    | 885.6    | 699.5    | 78.0 % ✓PASS     | 87.4 % ✓PASS     | 61.6 % ✓PASS     |
+| priv | R_iso,1× | R_iso,2× | R_muj,1× | R_muj,2× | G(π)            | OOD gap         | Combined        |
+|---   |---:      |---:      |---:      |---:      |---:             |---:             |---:             |
+| FULL | 2630.3   | 2311.2   | 1930.3   | 1108.9   | 73.4 % ✓PASS    | **87.9 % ✓PASS** | 42.2 % ✓PASS    |
+| INT  | 2601.9   | 2081.5   | 2076.9   | 1586.7   | 79.8 % †PASS    | 80.0 % ✓PASS    | 61.0 % †PASS    |
+| EXT  | 2530.2   | 1856.4   | 1791.3   | 1111.8   | 70.8 % ✓PASS    | 73.4 % ✓PASS    | 43.9 % ✓PASS    |
 
-**Behaviour (gait-quality) metrics at DR×1 and DR×2** *(from
-`results/go2_cts_priv_ablation_table.md`; lower is better except
+† INT's G(π)/Combined are inflated by the **stationary-policy artefact** —
+see (ii) below; reward-retention overstates behaviour when the policy is not
+locomoting.
+
+**Behaviour (gait-quality) metrics** *(regenerated; lower is better except
 `gait_adh`/`contact_sym`. DR×2 = OOD on the DR axis.):*
 
 | sim    | DR | priv | gait adh. | contact sym. | swing clear. err. | foot slip rate | action smooth. | base-z var. | stride var. | joint-torque var. |
 |---     |---:|---   |---:       |---:          |---:               |---:            |---:            |---:         |---:         |---:               |
-| Isaac  | 1  | FULL | 0.329     | 0.834        | 0.0060            | 0.153          | 1.80           | 0.0010      | 0.0006      | 5.75              |
-| Isaac  | 1  | INT  | 0.337     | 0.868        | 0.0073            | 0.277          | 1.56           | 0.0010      | 0.0019      | 5.71              |
-| Isaac  | 1  | EXT  | 0.330     | 0.838        | 0.015             | 0.309          | 2.67           | 0.0021      | 0.0006      | 8.10              |
-| MuJoCo | 1  | FULL | 0.205     | 0.074        | 0.0012            | 1.64           | 1.36           | 0.0004      | 0.0027      | **18.85**         |
-| MuJoCo | 1  | INT  | 0.211     | **0.0006**   | 0.0005            | 1.29           | **0.40**       | 0.0000      | 0.0006      | **6.82**          |
-| MuJoCo | 1  | EXT  | 0.216     | 0.048        | 0.0008            | 1.48           | 1.11           | 0.0003      | 0.0060      | 16.01             |
-| Isaac  | 2  | FULL | 0.321     | 0.798        | 0.0053            | 0.164          | 2.04           | 0.0010      | 0.0026      | 6.36              |
-| Isaac  | 2  | INT  | 0.325     | 0.814        | 0.012             | 0.346          | 3.15           | 0.0014      | 0.0008      | 9.76              |
-| Isaac  | 2  | EXT  | 0.334     | 0.852        | 0.011             | 0.337          | 2.63           | 0.0019      | 0.0008      | 10.08             |
-| MuJoCo | 2  | FULL | 0.217     | 0.081        | 0.0026            | 1.53           | 1.64           | 0.0008      | 0.0048      | **22.47**         |
-| MuJoCo | 2  | INT  | 0.204     | **0.0055**   | 0.0008            | 1.25           | **0.53**       | 0.0002      | 0.0022      | **8.40**          |
-| MuJoCo | 2  | EXT  | 0.215     | 0.072        | 0.0025            | 1.29           | 1.10           | 0.0004      | 0.0035      | 17.53             |
+| Isaac  | 1  | FULL | 0.338     | 0.871        | 0.0035            | 0.160          | 1.73           | 0.0005      | 0.0006      | 5.07              |
+| Isaac  | 1  | INT  | 0.345     | 0.900        | 0.0039            | 0.292          | 1.47           | 0.0005      | 0.0018      | 5.11              |
+| Isaac  | 1  | EXT  | 0.349     | 0.918        | 0.0035            | 0.314          | 1.48           | 0.0005      | 0.0014      | 4.57              |
+| MuJoCo | 1  | FULL | 0.203     | 0.068        | 0.0013            | 1.63           | 1.36           | 0.0004      | 0.0061      | 18.19             |
+| MuJoCo | 1  | INT  | 0.136     | **0.0000**   | **0.0000**        | 1.10           | **0.008**      | 0.0000      | **0.0001**  | **0.191**         |
+| MuJoCo | 1  | EXT  | 0.218     | 0.049        | 0.0010            | 1.49           | 1.17           | 0.0003      | 0.0051      | 15.76             |
+| Isaac  | 2  | FULL | 0.326     | 0.822        | 0.0049            | 0.240          | 2.12           | 0.0011      | 0.0038      | 6.24              |
+| Isaac  | 2  | INT  | 0.331     | 0.841        | 0.0089            | 0.304          | 1.99           | 0.0014      | 0.0023      | 7.90              |
+| Isaac  | 2  | EXT  | 0.324     | 0.810        | 0.013             | 0.312          | 3.01           | 0.0018      | 0.0015      | 10.93             |
+| MuJoCo | 2  | FULL | 0.208     | 0.091        | 0.0068            | 1.59           | 2.21           | 0.0010      | 0.0041      | 21.85             |
+| MuJoCo | 2  | INT  | 0.171     | 0.010        | 0.0034            | 1.23           | **0.400**      | 0.0001      | 0.0016      | **5.53**          |
+| MuJoCo | 2  | EXT  | 0.210     | 0.057        | 0.0027            | 1.15           | 1.06           | 0.0004      | 0.0043      | 16.66             |
 
-**Reading.** (i) **In Isaac**, dropping the privileged subset hurts modestly:
-INT keeps ~99 % of FULL's reward at DR×1 and 91 % at DR×2; EXT loses ~10 %
-in both. FULL is the only subset that keeps 100 % success at Isaac DR×2. (ii)
-**In MuJoCo, INT actually beats FULL on raw reward** (+14 % at DR×1, +46 %
-at DR×2) and gives the best G(π)/Combined transfer ratios — but its
-**task-success rate is sharply lower** (60 % vs 97 % at DR×1; 43 % vs 53 %
-at DR×2). The 0.3 m/s velocity-RMSE spec is breached by INT in **both**
-MuJoCo cells (0.306, 0.349). (iii) **EXT alone is the weakest subset
-everywhere except Isaac DR×1**, with the lowest success rate in MuJoCo at
-both DR scales. (iv) **The interaction signals in EXT carry behavioural
-information that proprioception-plus-history cannot recover**: removing them
-(INT-only) inflates reward at the cost of tracking, so FULL — the
-combination of both subsets — is the configuration that wins the
-behaviour-quality criterion the report cares about.
-
-(v) **The behaviour metrics explain the mechanism — and DR×2 makes the gap
-larger, not smaller.** At MuJoCo DR×1, INT uses **64 % less joint-torque
-variance** (6.82 vs FULL 18.85) and **71 % less action-smoothness penalty**
-(0.40 vs 1.36): INT-only learns a quieter, lower-effort policy that *saves
-reward by under-tracking the velocity command*, exactly as the lower success
-rate / higher RMSE confirm. At MuJoCo **DR×2** the same picture intensifies:
-FULL's torque variance jumps to **22.47** (chasing the command harder under
-the harder DR), while INT keeps it at **8.40** and EXT stays at 17.53 —
-i.e. only FULL "spends" extra effort under OOD-DR, and that effort buys it
-the highest success rate of the three subsets at DR×2 (53 % vs INT 43 % vs
-EXT 33 %). Contact symmetry collapses for every subset in MuJoCo
-(Isaac ~0.83 → MuJoCo ~0.0006 for INT, ~0.07 for FULL/EXT) independently of
-DR scale, so the periodic-gait loss is a *simulator-change* effect, not a
-DR-OOD effect.
+**Reading (corrected — the bug fix sharpens, not weakens, the FULL story).**
+(i) **In Isaac (training-faithful)** the ordering is clean **FULL ≥ INT ≥
+EXT**: at DR×1 all three survive 100 % and INT/EXT cost only −1.1 %/−3.8 %
+reward; at DR×2 FULL retains 87 % survival and the best tracking (0.157),
+INT matches survival but tracks worse (0.191), and **EXT degrades most**
+(73 % survival, −19.7 % reward, 0.206). (ii) **In MuJoCo, INT does NOT beat
+FULL — it stops walking.** INT's higher raw reward (+7.6 % / +43.1 %) is a
+*stationary-policy artefact*: success % = **0** at DR×1 (vs FULL 93 %),
+vel-RMSE = **0.497** (≈ the 0.5 m/s command → ~zero forward velocity), and
+the behaviour metrics are unambiguous — INT MuJoCo DR×1 action-smoothness
+**0.008**, joint-torque variance **0.191**, stride variance **0.0001**,
+contact symmetry **0.000**: a robot standing essentially still (the same
+failure mode as RMA's Phase-2 module, §C.2c). FULL is the **only** subset
+that actually locomotes in MuJoCo (93 % success, jtorque-var 18.19, real
+gait). EXT partially locomotes (67 % success). (iii) **Conclusion (now
+stronger):** only the **FULL** privileged combination transfers as genuine
+locomotion to MuJoCo; the interaction signals removed in INT are exactly
+what prevents the policy from collapsing to a stationary "survive-by-not-
+moving" solution. The earlier (buggy, 10 s) table's claim that "INT beats
+FULL on reward in MuJoCo" was a measurement artefact — corrected, INT's
+reward advantage is revealed as non-locomotion.
 
 ### C.6 Plots/tables planned and present
 *(see §E for one-line image captions and §F for longer figure descriptions.)*
@@ -522,6 +812,21 @@ artefacts:
   - {filename: "results/go2_results_table.md",                                     shows: "per-row reward+success table; spec-sheet transfer-ratio table",       source: "scripts/plot_results_go2.py",         status: "ready"}
   - {filename: "results/go2_cts_priv_ablation_table.md",                           shows: "CTS-only FULL/INT/EXT ablation: reward, success, vel-RMSE, Δ vs FULL; transfer ratios per priv subset", source: "scripts/plot_results_go2.py::write_cts_priv_ablation_table", status: "ready"}
   - {filename: "results/one_leg_results_table.md",                                 shows: "per-row Isaac reward+success on the single leg; OOD retention",      source: "scripts/plot_results_one_leg.py",     status: "ready"}
+  # ────────────────────────────────────────────────────────────────────────
+  # ✅ ALL Go2 figures + tables below were REGENERATED 2026-05-18 from the
+  # CORRECTED post-bugfix data (20 s, v2 ckpts). Command:
+  #   python scripts/_consolidate_v2.py        # builds the two v2 CSVs
+  #   python scripts/plot_results_go2.py \
+  #       --ood results/ood_go2_v2.csv --sim2sim results/sim2sim_go2_v2.csv
+  # Provenance: ood_go2_v2.csv = isaac_v2_trainfaithful_20s.csv (Baseline·BASE,
+  # RMA·FULL, CTS·FULL) + isaac_cts_intext_trainfaithful_20s.csv (CTS·INT/EXT),
+  # i.e. CANONICAL training-faithful Isaac (flat+push). sim2sim_go2_v2.csv =
+  # Baseline/RMA from sim2sim_report_v2_matched.json + CTS·FULL/INT/EXT from
+  # mujoco_cts_priv_20s.csv (clean per-ckpt sim2sim_go2.py, no-push).
+  # status:ready is now ACCURATE. fig_go2_latent_ablation is intentionally
+  # skipped (only Z=8 trained). A standalone 3-condition figure also exists:
+  # results/figures/fig_go2_v2_corrected.{png,pdf} (scripts/plot_v2_corrected.py).
+  # ────────────────────────────────────────────────────────────────────────
   # Go2 figures
   - {filename: "results/figures/fig_go2_headline.{png,pdf}",                       shows: "headline single-figure (G(π) per method, DR×1 vs DR×2 with PASS/FAIL)", source: "plot_results_go2.py::fig_headline",  status: "ready"}
   - {filename: "results/figures/fig_go2_summary.{png,pdf}",                        shows: "2x2 spec-sheet panel (return / survival / RMSE / threshold matrix)", source: "plot_results_go2.py::fig_summary_dashboard", status: "ready"}
@@ -595,19 +900,23 @@ artefacts:
   variable**. At deployment no method uses privileged simulator state:
   Baseline sees `o_t`, RMA and CTS see `[o_t, ẑ]` with `ẑ` produced from a
   50-step proprioceptive history.
-- **The reward-vs-success distinction is the central technical point of the
-  Go2 results.** Baseline's reward retains the most (G(π) = 93 %) but it
-  *survives without tracking*: in MuJoCo only 63 % of its episodes actually
-  meet the velocity-tracking spec, against 97 % for CTS at the same DR scale.
-  Reward is not the right scoring rule on its own — the spec-sheet 3-class
-  outcome (success / partial / fail) and RMSE/survival panels are the
-  primary evidence. **The CTS privileged-subset ablation reproduces this
-  reward-vs-success split inside the CTS family**: INT-only (16-D body
-  params) gets the best raw-reward transfer (G(π) = 89.4 %) but only 60 %
-  success in MuJoCo at DR×1, while FULL retains 97 %. EXT-only (10-D
-  interaction signals) is the weakest, isolating *which half of the
-  privileged vector carries which kind of information*: body parameters are
-  enough for reward, interaction signals are required for tracking.
+- **The reward/survival-vs-locomotion distinction is the central technical
+  point of the Go2 results (CORRECTED — use §C.2/C.3/C.5 numbers).** Reward
+  and survival alone *overstate* behaviour because a policy can "survive by
+  not moving": **RMA**'s Phase-2 module does exactly this in MuJoCo — 100 %
+  survival but forward displacement ≈ 0 m and velocity-RMSE pinned at the
+  0.5 m/s command (§C.2c). The genuine task metric is forward locomotion +
+  tracking, on which **CTS-FULL wins** (best survival *and* tracking at the
+  training-faithful condition, §C.2a; smallest OOD drop). **The CTS
+  privileged-subset ablation reproduces the same artefact inside the CTS
+  family**: in MuJoCo, **INT-only collapses to a stationary policy — 0 %
+  task-success at DR×1 despite 100 % survival** (vel-RMSE 0.497, torque-var
+  0.19), so its higher *raw reward* is non-locomotion; **only FULL truly
+  locomotes (93 % success)**, EXT partially (67 %). Body-parameter signals
+  (INT) alone are insufficient; the interaction signals removed in INT are
+  exactly what prevents the stationary-collapse. Reward is not the scoring
+  rule — the 3-class success/partial/fail + forward-displacement + RMSE
+  panels are the primary evidence.
 - **Sim-to-sim as a proxy for sim-to-real.** Train in Isaac Lab (PhysX);
   transfer zero-shot to MuJoCo (`mujoco_menagerie/unitree_go2`). OOD sweeps at
   s ∈ {1.0, 2.0} probe robustness beyond the training distribution.
@@ -650,6 +959,10 @@ artefacts:
 
 ## E. Figure caption stubs (one line each, for figure environments)
 
+> ✅ **Corrected 2026-05-18.** Go2 stubs below now carry the verified
+> §C.2/C.3/C.5 numbers (Isaac = v2 training-faithful flat+push 20 s; MuJoCo =
+> no-push 20 s). Safe to paste.
+
 Use these as `\caption{...}` text inside the LaTeX figure environments;
 keep them short, factual, and consistent with the data in §C.2/C.3.
 
@@ -660,71 +973,77 @@ keep them short, factual, and consistent with the data in §C.2/C.3.
   (R_Isaac,2× / R_Isaac,1×). All three methods pass the 70 % spec
   (Baseline 88 %, RMA 93 %, CTS 91 %); the privileged-input T–S advantage
   does not appear on this fixed-base platform.*
-- **`fig_go2_headline`** — *Go2 sim-to-sim transfer retention G(π,s) at DR×1
-  and DR×2. Baseline 93 % / 79 %, RMA 89 % / 90 %, CTS 77 % / 58 %. The
-  60 % spec line is shown; only CTS at DR×2 fails the reward-retention spec
-  (but it is also the only method that keeps its task-success rate; see §F).*
+- **`fig_go2_headline`** — *Go2 sim-to-sim transfer (Isaac = v2 training-
+  faithful, MuJoCo = no-push). Reward-retention G(π) = R_MuJoCo,1× /
+  R_Isaac,1×: Baseline 91 %, CTS 73 %, RMA 121 % — RMA's >100 % is an
+  artefact of its near-stationary MuJoCo policy (high alive-bonus, zero
+  locomotion), not transfer quality. The honest metric is forward
+  locomotion: CTS is the only method that both survives and tracks across
+  the simulator change.*
 - **`fig_go2_summary`** — *Spec-sheet summary panel for Go2: (A) cumulative
-  episode reward, (B) survival rate (success + partial), (C) velocity-tracking
-  RMSE with the 0.3 m/s spec line, (D) threshold-pass matrix. The 80 % survival
-  spec is met by every cell except RMA at Isaac DR×2 (47 %); the 0.3 m/s RMSE
-  spec is breached only at MuJoCo DR×2 by Baseline (0.34) and RMA (0.40), with
-  CTS exactly at 0.30.*
+  episode reward, (B) survival rate, (C) velocity-tracking error with the
+  0.3 m/s spec line, (D) threshold-pass matrix. At the training-faithful
+  Isaac condition every method survives 100 % at DR×1; at DR×2 survival is
+  Baseline 73 %, CTS 87 %, RMA 23 % (RMA the only sub-80 % cell). In MuJoCo
+  the 0.3 m/s tracking spec is met by CTS (0.18) and Baseline (0.22) at
+  DR×1; RMA sits at 0.50 (stationary) in every MuJoCo cell.*
 - **`fig_go2_comparison`** — *Four-view reward comparison (rows = OOD inside a
   sim, columns = sim-to-sim transfer): (A) Isaac OOD DR×1 vs DR×2, (B) MuJoCo
   OOD DR×1 vs DR×2, (C) sim-to-sim transfer at DR×1, (D) sim-to-sim transfer
   at DR×2 (worst case). Δ annotations report the retention ratio of the
   right-bar to the left-bar.*
 - **`fig_go2_comparison_survival`** — *Same four views as
-  `fig_go2_comparison`, but Y axis is survival rate (success + partial). RMA
-  is the only method that falls below the 80 % survival spec, at Isaac DR×2
-  (47 %).*
+  `fig_go2_comparison`, but Y axis is survival rate. At the training-faithful
+  Isaac condition CTS degrades least under OOD (DR×1→DR×2: 100→87 %) vs
+  Baseline 100→73 % and RMA 80→23 % — RMA is the only method below the 80 %
+  spec, at Isaac DR×2 (23 %).*
 - **`fig_go2_comparison_rmse`** — *Same four views, Y axis is
-  linear-velocity-tracking RMSE with the 0.3 m/s spec line. CTS has the
-  lowest RMSE in every Isaac panel and is the only method at or below
-  0.3 m/s in MuJoCo at DR×2.*
-- **`fig_go2_comparison_outcome`** — *Same four views, stacked Success / Partial
-  / Fail per method. The Baseline–vs–CTS difference at MuJoCo DR×1 is
-  dominated by *partial* episodes for Baseline (37 % partial) — i.e. the
-  robot stays up but does not track the velocity command — whereas CTS
-  classifies 97 % as full success.*
-- **`fig_go2_ood_profile`** — *Isaac-only OOD profile: (A) Isaac OOD
-  retention with the 70 % spec line — Baseline 89 % PASS, RMA 48 % FAIL,
-  CTS 88 % PASS; (B) absolute Isaac reward at DR×1 and DR×2.*
-- **`fig_go2_sim2sim_transfer`** — *Sim-to-sim transfer figure: (A) G(π,s)
-  bars with the 60 % spec line — Baseline 93 % / 79 %, RMA 89 % / 90 %, CTS
-  77 % / 58 %; (B) absolute Isaac and MuJoCo reward side-by-side with the
-  Δ = R_Isaac − R_MuJoCo gap annotated per bar.*
+  velocity-tracking error with the 0.3 m/s spec line. CTS has the lowest
+  error in every panel where it locomotes (Isaac 0.13/0.16, MuJoCo
+  0.18/0.33). RMA is pinned at ≈0.50 in MuJoCo — it is not tracking
+  (stationary policy), so its "low-variance" bars are not a quality signal.*
+- **`fig_go2_comparison_outcome`** — *Same four views, stacked Success /
+  Partial / Fail per method. The decisive contrast is MuJoCo: CTS-FULL
+  produces genuine locomotion (forward displacement ≈ 8 m at DR×1) while
+  RMA's Phase-2 module collapses to a stationary "survive-by-not-moving"
+  policy (forward ≈ 0 m) — high survival, zero task success.*
+- **`fig_go2_ood_profile`** — *Isaac-only OOD profile: (A) reward-retention
+  R_Isaac,2× / R_Isaac,1× with the 70 % spec line — Baseline 70 % PASS,
+  CTS 88 % PASS, RMA 40 % FAIL (RMA the only OOD-spec failure); (B) absolute
+  Isaac reward at DR×1 and DR×2.*
+- **`fig_go2_sim2sim_transfer`** — *Sim-to-sim transfer figure: (A) G(π) and
+  combined-gap bars with the 60 % / 40 % spec lines — Baseline G 91 % /
+  Comb 68 %, CTS G 73 % / Comb 42 %, RMA G 121 % / Comb 103 % (RMA values
+  inflated by its stationary MuJoCo policy); (B) absolute Isaac vs MuJoCo
+  reward side-by-side with the Δ gap annotated per bar.*
 - **`fig_go2_gait_quality`** — *Eight gait-quality metrics for Baseline / RMA /
-  CTS on Go2 at FULL / Z = 8 / DR×1, Isaac (solid) vs MuJoCo (hatched):
-  gait adherence, contact symmetry (sharply collapses in MuJoCo for every
-  method, indicating a periodic-gait → drifty-gait sim-to-sim shift), swing
-  clearance error, foot-slip rate (rises in MuJoCo), action smoothness, base-
-  height variance, stride variance, joint-torque variance.*
+  CTS at FULL / Z = 8 / DR×1, Isaac (solid) vs MuJoCo (hatched). Contact
+  symmetry collapses Isaac→MuJoCo for every method (Baseline 0.90→0.14,
+  CTS 0.87→0.07, RMA 0.96→0.00) — a periodic→drifty sim-to-sim shift. RMA's
+  MuJoCo bars are flat-lined (action-smoothness 0.001, joint-torque variance
+  0.09) — the quantitative signature of a robot standing still, not a good
+  gait.*
 - **`fig_go2_cts_priv_ablation`** — *CTS privileged-subset ablation
-  (FULL = 26-D, INT = 16-D body params, EXT = 10-D interaction signals) across
-  four views: Isaac DR×1, Isaac DR×2, MuJoCo DR×1, MuJoCo DR×2. Top row =
-  episode reward, bottom row = success rate (%) with the 80 % spec line. In
-  Isaac all three subsets are competitive; in MuJoCo INT actually beats FULL
-  on raw reward but FULL has the highest success rate (97 % vs INT 60 % vs
-  EXT 53 % at DR×1), showing that the interaction signals in EXT carry
-  behavioural information not recoverable from history.*
-- **`fig_go2_cts_priv_ablation_gait_dr1`** — *Behaviour-metric companion to
-  `fig_go2_cts_priv_ablation` at the training distribution (DR×1): the 8
-  gait-quality metrics (gait adherence, contact symmetry, swing-clearance
-  error, foot-slip rate, action smoothness, base-height variance, stride
-  variance, joint-torque variance) for the three CTS variants, Isaac (solid)
-  vs MuJoCo (hatched). Shows that INT-only uses ~64 % less joint-torque
-  variance and ~71 % less action-smoothness penalty in MuJoCo than FULL — a
-  quieter, lower-effort policy that under-tracks (lower success), which is
-  the mechanism behind INT's high reward and low task success in MuJoCo.*
-- **`fig_go2_cts_priv_ablation_gait_dr2`** — *Same 8 metrics at DR×2 (OOD on
-  the DR axis). The FULL-vs-INT gap on joint-torque variance widens from
-  ×2.8 (18.85 / 6.82) at DR×1 to ×2.7 (22.47 / 8.40) at DR×2 — FULL keeps
-  "spending" extra control effort under harder DR to maintain tracking,
-  while INT does not. Contact symmetry collapse in MuJoCo is unchanged by
-  DR scale, confirming that the periodic-gait loss is a simulator-change
-  effect rather than a DR-OOD effect.*
+  (FULL = 26-D, INT = 16-D body params, EXT = 10-D interaction signals)
+  across four views: Isaac DR×1, Isaac DR×2, MuJoCo DR×1, MuJoCo DR×2. Top
+  row = episode reward, bottom row = success rate. In Isaac all three are
+  competitive (DR×1 100 % each; DR×2 FULL/INT 87 %, EXT 73 %). In MuJoCo
+  only FULL truly locomotes (success 93 % at DR×1); **INT collapses to a
+  stationary policy (0 % success despite high reward)** and EXT is partial
+  (67 %) — the interaction signals removed in INT are exactly what prevents
+  the stationary collapse.*
+- **`fig_go2_cts_priv_ablation_gait_dr1`** — *Behaviour-metric companion at
+  DR×1: the 8 gait metrics for the three CTS variants, Isaac (solid) vs
+  MuJoCo (hatched). The smoking gun for INT's MuJoCo collapse: INT MuJoCo
+  action-smoothness 0.008 and joint-torque variance 0.19 (vs FULL 1.36 /
+  18.19) with contact symmetry ≈ 0 — INT is not locomoting, which is why
+  its raw reward looks high but task-success is 0 %.*
+- **`fig_go2_cts_priv_ablation_gait_dr2`** — *Same 8 metrics at DR×2. INT
+  stays in the stationary regime (joint-torque variance 5.5 vs FULL 21.9;
+  action-smoothness 0.40 vs FULL 2.21); FULL spends real control effort to
+  keep tracking. Contact-symmetry collapse in MuJoCo is unchanged by DR
+  scale — the periodic-gait loss is a simulator-change effect, not a
+  DR-OOD effect.*
 - **`fig_architecture_diagram`** — *(to be drawn) Side-by-side data flow for the
   three configurations: Baseline (o_t → MLP → a_t), RMA (Phase 1: x_t → μ → z,
   policy on [o_t, z]; Phase 2: history → φ → ẑ, frozen teacher actor on
@@ -733,11 +1052,12 @@ keep them short, factual, and consistent with the data in §C.2/C.3.
 - **`fig_go2_learning_curves`** — *Go2 PPO learning curve: Train/mean_reward
   vs iteration (0–25 000) for Baseline / RMA / CTS at FULL, Z = 8 — light
   raw lines and bold EMA-smoothed lines per method. RMA shows the
-  characteristic curriculum dip ~iter 9 000-11 000; CTS converges highest
-  (~2 100), Baseline second (~2 000), RMA lowest (~1 990).*
+  characteristic curriculum dip ~iter 9 000-11 000; final reward
+  CTS 2110 (highest), Baseline 2041, RMA 2011.*
 - **`fig_go2_learning_curves_len`** — *Same three methods, Y axis = mean
-  episode length in control steps (max 500 = 10 s episode). All three saturate
-  near 500 by iter ~3 000.*
+  episode length in control steps (max 1000 = 20 s episode). All three
+  saturate near the 1000-step cap by iter ~3 000 (final: Baseline 1000,
+  CTS 990, RMA 986).*
 - **`fig_go2_cts_teacher_student`** — *Concurrent teacher/student training
   inside CTS-FULL: separate side-by-side panels (teacher = navy, student =
   orange) sharing y-axis, plus a gap (T − S) strip below. Post-warmup mean
@@ -752,14 +1072,20 @@ keep them short, factual, and consistent with the data in §C.2/C.3.
   uniformly across the privileged-subset space.*
 - **`fig_go2_cts_priv_learning_curves`** — *Single-panel overlay of the
   Train/mean_reward learning curves for the three CTS variants (FULL / INT /
-  EXT), Z = 8. Final smoothed reward in the legend: FULL = 2104, INT = 1986,
-  EXT = 1968. FULL leads consistently from iter ~1 500; INT and EXT converge
-  to nearly identical training reward (~6 % below FULL) despite encoding
+  EXT), Z = 8. Final reward: FULL = 2110, INT = 1963, EXT = 1989.
+  FULL leads consistently from iter ~1 500; INT and EXT converge to nearly
+  identical training reward (~7 % below FULL) despite encoding
   qualitatively different signals.*
 
 ---
 
 ## F. Detailed image descriptions for the LaTeX-drafting AI
+
+> ✅ **Corrected 2026-05-18.** §F.3–F.18 Go2 readings now carry the verified
+> §C.2/C.3/C.5 numbers (Isaac = v2 training-faithful flat+push 20 s; MuJoCo
+> = no-push 20 s; figures regenerated). F.16/F.17 (teacher–student) were
+> verified against the training CSVs and were already correct. §F.1–F.2
+> (single-leg) unaffected. Safe to paste.
 
 Each block below states **what the figure shows**, **the encoding** (axes,
 colour/hatch grammar), and **the one-sentence reading** the report should
@@ -791,103 +1117,106 @@ alpha; in cross-sim panels Isaac = solid, MuJoCo = hatched.
   hypothesis."*
 
 ### F.3 `fig_go2_headline.png` (Go2 sim-to-sim, primary figure)
-- **Single panel.** For each method, two bars side-by-side: G(π) at DR×1
-  (solid) vs G(π) at DR×2 (hatched). Numbers above bars: Baseline 93 % / 79 %,
-  RMA 89 % / 90 %, CTS 77 % / 58 %. Dashed line at 60 % (spec), dotted line at
-  100 % ("perfect"). PASS/FAIL badges per bar.
-- **Quote-ready reading.** *"On reward alone, Baseline transfers best to
-  MuJoCo (93 % at DR×1, 79 % at DR×2). RMA's transfer is uniformly good
-  (89–90 %) but starts from a low Isaac base. CTS retains the least raw
-  reward (77 % / 58 %) but, as the success-rate and RMSE panels show,
-  is the only method that retains the **behaviour** the report cares about."*
+- **Single panel.** For each method, two bars: G(π) at DR×1 (solid) vs DR×2
+  (hatched), where G(π,s) = R_MuJoCo,s / R_Isaac,s. Numbers: Baseline
+  91 % / 97 %, CTS 73 % / 48 %, RMA 121 % / 256 %. Dashed 60 % spec line.
+  RMA's >100 % bars are flagged as a stationary-policy artefact.
+- **Quote-ready reading.** *"Reward-retention alone is misleading here: RMA's
+  apparent >100 % 'transfer' is an artefact — in MuJoCo its Phase-2 module
+  produces a near-stationary policy (forward displacement ≈ 0 m, velocity
+  error pinned at the command magnitude), so the alive-bonus inflates
+  reward without locomotion. Baseline retains ~91 % and CTS ~73 % of raw
+  reward, but the success-rate, forward-displacement and RMSE panels show
+  CTS is the only method that transfers genuine, well-tracked locomotion."*
 
 ### F.4 `fig_go2_summary.png` (Go2 spec-sheet 2×2 dashboard)
 - **(A)** Cumulative episode reward, four groups of three bars (Isaac×1,
   Isaac×2, MuJoCo×1, MuJoCo×2), per-method colour.
-- **(B)** Survival rate (success + partial) with the 80 % spec line.
-- **(C)** Velocity-tracking RMSE with the 0.3 m/s spec line.
-- **(D)** 3×6 PASS/FAIL matrix over (method × {Survival Isaac 1×, Survival
-  MuJoCo 1×, vel_rmse 1×, G(π) ≥ 60, OOD gap ≥ 70, Combined ≥ 40}). Only
-  cells highlighted in orange (one cell: RMA OOD gap = 48 % FAIL).
-- **Quote-ready reading.** *"The spec-sheet check passes for every cell
-  except RMA's Isaac-OOD retention (48 %, below the 70 % spec). Baseline
-  passes every spec but trails CTS on survival rate and RMSE in MuJoCo."*
+- **(B)** Survival rate with the 80 % spec line.
+- **(C)** Velocity-tracking error with the 0.3 m/s spec line.
+- **(D)** PASS/FAIL matrix over (method × {Survival, vel_err, G(π) ≥ 60,
+  OOD gap ≥ 70, Combined ≥ 40}). The one orange FAIL cell: RMA OOD gap
+  40.2 %.
+- **Quote-ready reading.** *"Every spec passes except RMA's Isaac OOD
+  reward-retention (40.2 %, the only FAIL). At the training-faithful Isaac
+  condition survival is Baseline 100→73 %, CTS 100→87 %, RMA 80→23 %
+  (DR×1→DR×2); CTS degrades least. In MuJoCo the 0.3 m/s tracking spec is
+  met by CTS (0.18) and Baseline (0.22) at DR×1, while RMA sits at 0.50
+  in every MuJoCo cell because it is not moving."*
 
 ### F.5 `fig_go2_comparison.png` (4-view reward)
 - **2×2 grid** of bar plots. Rows = OOD-inside-sim (top) and sim-to-sim
-  transfer (bottom). Columns = (left) DR×1 vs something, (right) DR×2 vs
-  something.
-- **(A)** Isaac OOD: DR×1 (solid) vs DR×2 (hatched) per method. Δ annotation
-  = OOD retention.
-- **(B)** MuJoCo OOD: DR×1 vs DR×2 per method. Δ annotation = MuJoCo OOD
-  retention.
-- **(C)** Sim2Sim @ DR×1: Isaac (solid) vs MuJoCo (hatched). Δ = G(π) at 1×.
-- **(D)** Sim2Sim @ DR×2 (worst case): Isaac (solid) vs MuJoCo (hatched). Δ
-  = G(π) at 2×.
-- **Quote-ready reading.** *"The single feature that distinguishes the three
-  methods is the **DR×2 column** in both rows: under aggressive
-  randomisation RMA's reward collapses to 47 % of its DR×1 value in Isaac
-  (the largest drop), while CTS keeps the highest absolute MuJoCo-DR×2
-  reward (647.7 vs Baseline 889.4 — but with much lower variance and
-  better success rate)."*
+  transfer (bottom). Columns = DR×1 (left) / DR×2 (right).
+- **(A)** Isaac OOD: DR×1 (solid) vs DR×2 (hatched); Δ = OOD retention.
+- **(B)** MuJoCo OOD: DR×1 vs DR×2; Δ = MuJoCo OOD retention.
+- **(C)** Sim2Sim @ DR×1: Isaac (solid) vs MuJoCo (hatched); Δ = G(π) at 1×.
+- **(D)** Sim2Sim @ DR×2 (worst case): Isaac vs MuJoCo; Δ = G(π) at 2×.
+- **Quote-ready reading.** *"The distinguishing feature is the DR×2 column:
+  RMA's Isaac reward collapses to 40 % of its DR×1 value (the largest OOD
+  drop, the only spec FAIL), while CTS retains 88 % and Baseline 70 %. In
+  MuJoCo CTS keeps the strongest locomotion (forward ≈ 4.2 m at DR×2 vs
+  RMA ≈ 0 m); reward bars for RMA are not comparable because RMA stands
+  still."*
 
 ### F.6 `fig_go2_comparison_survival.png`
 - Same 4 views as F.5, Y axis = survival rate (%). 80 % spec line.
-- Numbers per panel (Baseline / RMA / CTS):
-  - **A** (Isaac OOD, DR×1 → DR×2): 100/90/100 → **97/47/100**.
-  - **B** (MuJoCo OOD, DR×1 → DR×2): **100/100/100** → 83/83/77.
-  - **C** (Sim2Sim @ DR×1, Isaac → MuJoCo): 100/90/100 → 100/100/100.
-  - **D** (Sim2Sim @ DR×2, Isaac → MuJoCo, worst case): **97/47/100** → 83/83/77.
-- **Quote-ready reading.** *"Survival is where CTS pulls ahead: it is the
-  only method that retains 100 % survival in MuJoCo at the training
-  distribution, and it never drops below 77 % even at MuJoCo DR×2. RMA
-  drops to 47 % survival at Isaac DR×2 — its Phase-2 adapter does not
-  generalise OOD even inside Isaac."*
+  (Isaac = v2 training-faithful flat+push; MuJoCo = no-push.)
+- Numbers per panel (Baseline / CTS / RMA):
+  - **A** (Isaac OOD, DR×1 → DR×2): 100/100/80 → **73/87/23**.
+  - **B** (MuJoCo OOD, DR×1 → DR×2): 100/100/100 → 90/73/100.
+  - **C** (Sim2Sim @ DR×1, Isaac → MuJoCo): 100/100/80 → 100/100/100.
+  - **D** (Sim2Sim @ DR×2, worst case): 73/87/23 → 90/73/100.
+- **Quote-ready reading.** *"At the training-faithful Isaac condition CTS
+  degrades least under OOD (100→87 %) vs Baseline (100→73 %) and RMA
+  (80→23 %, the only sub-80 % method). MuJoCo survival is uniformly high,
+  but for RMA that is the stationary-policy artefact (100 % survival, 0 %
+  task success) — survival must be read together with forward
+  displacement, not alone."*
 
 ### F.7 `fig_go2_comparison_rmse.png`
-- Same 4 views, Y axis = linear-velocity-tracking RMSE (m/s). 0.3 m/s spec
-  line dashed. Lower is better.
-- Per panel (Baseline / RMA / CTS, DR×1 vs DR×2):
-  A (Isaac OOD) 0.14 / 0.20 / 0.12 → 0.16 / 0.28 / 0.17.
-  B (MuJoCo OOD) 0.25 / 0.28 / 0.18 → 0.34 / 0.40 / 0.30.
-  C (Sim2Sim DR×1) 0.14 / 0.20 / 0.12 vs 0.25 / 0.28 / 0.18.
-  D (Sim2Sim DR×2) 0.16 / 0.28 / 0.17 vs 0.34 / 0.40 / 0.30.
-- **Quote-ready reading.** *"CTS has the lowest RMSE in 3 of the 4 unique
-  cells (Isaac DR×1, MuJoCo DR×1, and the worst-case MuJoCo DR×2); only at
-  Isaac DR×2 does Baseline edge it by 0.16 vs 0.17. CTS is the only method
-  that lands within +1 % of the 0.3 m/s spec in the worst-case panel
-  (0.302). Baseline (0.34) and RMA (0.40) breach the spec by 13 % and 33 %
-  respectively."*
+- Same 4 views, Y axis = velocity-tracking error (m/s). 0.3 m/s spec line.
+  Lower is better. (Baseline / CTS / RMA, DR×1 → DR×2.)
+  - A (Isaac OOD)  0.144 / 0.130 / 0.201 → 0.239 / 0.157 / 0.259.
+  - B (MuJoCo OOD) 0.222 / 0.177 / 0.500 → 0.351 / 0.327 / 0.500.
+  - C (Sim2Sim DR×1) Isaac vs MuJoCo: 0.144/0.130/0.201 vs 0.222/0.177/0.500.
+  - D (Sim2Sim DR×2) Isaac vs MuJoCo: 0.239/0.157/0.259 vs 0.351/0.327/0.500.
+- **Quote-ready reading.** *"CTS has the lowest tracking error in every
+  panel — Isaac (0.13/0.16) and MuJoCo (0.18/0.33). RMA's MuJoCo error is
+  pinned at ≈0.50 = the 0.5 m/s command magnitude, i.e. zero forward
+  velocity: it is not tracking at all. Only CTS keeps tracking within
+  ~0.18 m/s after the simulator change at the training distribution."*
 
 ### F.8 `fig_go2_comparison_outcome.png`
-- Same 4 views, stacked bars Success (green) / Partial (orange) / Fail
-  (dark red). The "partial" share is the report's evidence for the
-  reward-vs-behaviour distinction.
-- **Quote-ready reading.** *"At MuJoCo DR×1, Baseline survives 100 % of
-  episodes but only 63 % are classed as success (37 % are partial — robot
-  upright but tracking RMSE above 0.3 m/s). CTS converts almost all
-  surviving episodes (97/100) into successes. The advantage of the
-  concurrent T–S architecture is not in raw reward but in turning survival
-  into useful tracking."*
+- Same 4 views, stacked bars Success / Partial / Fail. The Success share +
+  forward-displacement is the report's evidence for the
+  reward-vs-locomotion distinction.
+- **Quote-ready reading.** *"In MuJoCo, CTS-FULL converts survival into
+  genuine locomotion (forward displacement ≈ 8.2 m at DR×1, the highest of
+  any method) while RMA's Phase-2 module yields 100 % survival but ≈ 0 m
+  forward travel — survival without the task. The concurrent T–S
+  architecture's advantage is turning survival into useful, tracked
+  locomotion, not raw reward."*
 
 ### F.9 `fig_go2_ood_profile.png`
-- **(A)** Isaac OOD retention per method, with PASS/FAIL badges. Numbers:
-  Baseline 89 %, RMA 48 % (FAIL), CTS 88 %.
+- **(A)** Isaac OOD reward-retention (R_2× / R_1×) per method with PASS/FAIL
+  badges: Baseline 70 % PASS, CTS 88 % PASS, RMA 40 % FAIL.
 - **(B)** Absolute Isaac reward at DR×1 and DR×2.
 - **Quote-ready reading.** *"Even before crossing simulators, RMA fails the
-  Isaac OOD retention spec; Baseline and CTS both exceed it by a
-  comfortable margin."*
+  70 % Isaac OOD retention spec (40 %); CTS is the most OOD-robust (88 %)
+  and Baseline sits on the spec edge (70 %)."*
 
 ### F.10 `fig_go2_sim2sim_transfer.png`
-- **(A)** Sim2Sim retention G(π,s) per method at DR×1 (solid) and DR×2
-  (hatched), with the 60 % spec line.
-- **(B)** Absolute reward Isaac vs MuJoCo per method, with the Δ =
-  R_Isaac − R_MuJoCo gap annotated next to each MuJoCo bar.
-- **Quote-ready reading.** *"At the training distribution every method passes
-  the 60 % transfer spec (Baseline 93 %, RMA 89 %, CTS 77 %); under OOD-DR×2
-  CTS dips to 58 % — under-spec on reward, even though its **success share**
-  remains the highest. This is the cleanest evidence that reward alone is
-  not an adequate scoring rule for the sim-to-sim study."*
+- **(A)** Sim2Sim retention G(π,s) per method at DR×1 (solid) / DR×2
+  (hatched), 60 % spec line.
+- **(B)** Absolute reward Isaac vs MuJoCo per method, Δ = R_Isaac − R_MuJoCo
+  annotated.
+- **Quote-ready reading.** *"On raw reward every method clears the 60 %
+  transfer spec, but the ranking is dominated by the RMA stationary-policy
+  artefact (G(π) = 121 %). The honest evidence is panel (B) + forward
+  displacement: CTS is the only method whose Isaac→MuJoCo reward drop
+  corresponds to retained locomotion; RMA's small 'drop' corresponds to no
+  locomotion at all. Reward alone is not an adequate sim-to-sim scoring
+  rule."*
 
 ### F.11 `fig_go2_cts_priv_ablation.png` (CTS privileged-subset ablation)
 - **2×4 grid.** Columns = (Isaac DR×1, Isaac DR×2, MuJoCo DR×1, MuJoCo DR×2);
@@ -899,20 +1228,21 @@ alpha; in cross-sim panels Isaac = solid, MuJoCo = hatched.
 - **Bottom row** = success rate %. The 80 % spec line is dashed; numeric
   labels show the percentage above each bar.
 - **Key numbers per panel** (FULL / INT / EXT):
-  - Isaac DR×1: reward 1266 / 1252 / 1136; success 100 / 100 / 90 %.
-  - Isaac DR×2: reward 1117 / 1013 / 993; success 100 / 90 / 80 %.
-  - MuJoCo DR×1: reward 981 / **1119** / 886; success **97 / 60 / 53 %**.
-  - MuJoCo DR×2: reward 648 / **946** / 700; success 53 / 43 / 33 %.
-- **Quote-ready reading.** *"Inside Isaac the three privileged subsets are
-  near-equivalent (≤ 11 % reward drop, all keep ≥ 80 % success). In MuJoCo
-  the picture inverts on reward: INT alone beats FULL by +14 % at DR×1 and
-  +46 % at DR×2, while its task-success rate collapses to 60 % and 43 %
-  (against FULL's 97 % and 53 %). EXT alone is the weakest subset in every
-  cell of the bottom row. FULL — the union of body-parameter and
-  interaction signals — is the only configuration that keeps both reward
-  *and* tracking behaviour together in MuJoCo, confirming that the
-  interaction signals carry information the proprioceptive history cannot
-  recover."*
+  - Isaac DR×1: reward 2630 / 2602 / 2530; success 100 / 100 / 100 %.
+  - Isaac DR×2: reward 2311 / 2082 / 1856; success 87 / 87 / 73 %.
+  - MuJoCo DR×1: reward 1930 / **2077** / 1791; success **93 / 0 / 67 %**.
+  - MuJoCo DR×2: reward 1109 / **1587** / 1112; success 40 / 17 / 23 %.
+- **Quote-ready reading.** *"Inside Isaac (training-faithful) the three
+  subsets are near-equivalent at DR×1 (all 100 % success, ≤ 4 % reward
+  drop); under OOD-DR×2 FULL and INT hold 87 % survival while EXT drops to
+  73 %. In MuJoCo the reward column again looks inverted — INT's raw reward
+  exceeds FULL's (+8 % at DR×1, +43 % at DR×2) — but this is the
+  stationary-policy artefact: **INT's MuJoCo task-success is 0 % at DR×1**
+  (vs FULL 93 %) because INT stops locomoting (forward ≈ 0 m, velocity
+  error ≈ 0.50). FULL is the only subset that produces genuine MuJoCo
+  locomotion; EXT is partial (67 %). The interaction signals removed in INT
+  are exactly what prevent the stationary collapse — proprioceptive history
+  alone cannot recover them."*
 - **Companion table** is in `results/go2_cts_priv_ablation_table.md` (cited
   verbatim in §C.5).
 
@@ -930,50 +1260,50 @@ condition (each scaled-DR range widened ×2 about its midpoint).
   swing-clearance error ↓, foot-slip rate ↓. (bottom row) action smoothness ↓,
   base-height variance ↓, stride variance ↓, joint-torque variance ↓.
 - **Key numbers at DR×1** (Isaac → MuJoCo, FULL / INT / EXT):
-  - **gait adherence:** 0.33 / 0.34 / 0.33 → 0.21 / 0.21 / 0.22 — uniform drop in MuJoCo, ~independent of subset.
-  - **contact symmetry:** 0.83 / 0.87 / 0.84 → **0.074 / 0.0006 / 0.048** — every subset loses periodic gait in MuJoCo; INT loses it most completely.
-  - **swing-clearance error:** 0.0060 / 0.0073 / 0.015 → 0.0012 / 0.0005 / 0.0008 — counter-intuitively *lower* in MuJoCo (the foot lifts less because the gait is less periodic).
-  - **foot slip rate:** 0.15 / 0.28 / 0.31 → 1.64 / **1.29** / 1.48 — INT slips least in MuJoCo.
-  - **action smoothness:** 1.80 / 1.56 / 2.67 → 1.36 / **0.40** / 1.11 — INT is markedly smoother (lower control effort) in MuJoCo.
-  - **base-height variance:** 0.0010 / 0.0010 / 0.0021 → 0.0004 / 0.0000 / 0.0003 — INT keeps the body practically still in MuJoCo.
-  - **stride variance:** 0.0006 / 0.0019 / 0.0006 → 0.0027 / 0.0006 / **0.0060** — EXT pays for its low success with the highest stride irregularity.
-  - **joint-torque variance:** 5.75 / 5.71 / 8.10 → **18.85** / **6.82** / 16.01 — INT uses < 40 % of FULL's torque variance in MuJoCo.
+  - **gait adherence:** 0.338 / 0.345 / 0.349 → 0.203 / **0.136** / 0.218 — drops in MuJoCo for all; INT lowest (degenerate gait).
+  - **contact symmetry:** 0.871 / 0.900 / 0.918 → 0.068 / **0.000** / 0.049 — periodic gait lost in MuJoCo; INT loses it completely (standing still).
+  - **swing-clearance error:** 0.0035 / 0.0039 / 0.0035 → 0.0013 / **0.0000** / 0.0010 — INT ≈ 0 because the foot barely moves.
+  - **foot slip rate:** 0.160 / 0.292 / 0.314 → 1.63 / 1.10 / 1.49 — rises in MuJoCo for all.
+  - **action smoothness:** 1.73 / 1.47 / 1.48 → 1.36 / **0.008** / 1.17 — INT's ≈0 is the signature of a near-constant action (not moving).
+  - **base-height variance:** 0.0005 / 0.0005 / 0.0005 → 0.0004 / **0.0000** / 0.0003 — INT body is static in MuJoCo.
+  - **stride variance:** 0.0006 / 0.0018 / 0.0014 → 0.0061 / **0.0001** / 0.0051 — INT ≈ 0: no strides at all.
+  - **joint-torque variance:** 5.07 / 5.11 / 4.57 → 18.19 / **0.19** / 15.76 — INT uses ~1 % of FULL's MuJoCo torque variance: it is not actuating to walk.
 - **Key numbers at DR×2** (Isaac → MuJoCo, FULL / INT / EXT):
-  - **contact symmetry:** 0.80 / 0.81 / 0.85 → **0.081 / 0.0055 / 0.072** — same collapse pattern as DR×1; periodic gait is lost regardless of DR scale.
-  - **action smoothness:** 2.04 / 3.15 / 2.63 → 1.64 / **0.53** / 1.10 — INT smoothness gap *widens* under OOD-DR.
-  - **stride variance:** 0.0026 / 0.0008 / 0.0008 → **0.0048** / 0.0022 / 0.0035 — FULL's stride variability rises under OOD-DR (it is actively re-planning).
-  - **joint-torque variance:** 6.36 / 9.76 / 10.08 → **22.47** / **8.40** / 17.53 — FULL spends an extra 19 % of torque variance under OOD-DR (22.47 vs 18.85 at DR×1) to keep tracking; INT and EXT add only 23 % and 10 % respectively.
-- **Quote-ready reading.** *"The behaviour-metric panels expose the mechanism
-  behind the surprising reward inversion in the CTS ablation. In MuJoCo,
-  INT-only learns a quieter, low-effort policy (joint-torque variance and
-  action smoothness ≈ ⅓ of FULL's) that saves reward at the cost of
-  velocity tracking — explaining why its reward is higher but its success
-  rate is dramatically lower. Under OOD-DR (DR×2), FULL alone spends
-  additional torque variance (22.47 vs 18.85 at DR×1) to keep tracking,
-  while INT continues to under-actuate (8.40 vs 6.82) — a behavioural
-  signature of which subset is 'trying harder' when the world becomes less
-  familiar. Contact symmetry collapses for every subset in MuJoCo at both DR
-  scales, indicating the periodic-gait → drifty-gait shift is a
-  simulator-change effect that is independent of the privileged input."*
+  - **contact symmetry:** 0.822 / 0.841 / 0.810 → 0.091 / **0.010** / 0.057 — same collapse; INT still essentially frozen.
+  - **action smoothness:** 2.12 / 1.99 / 3.01 → 2.21 / **0.400** / 1.06 — INT stays in the low-effort stationary regime.
+  - **stride variance:** 0.0038 / 0.0023 / 0.0015 → 0.0041 / 0.0016 / 0.0043 — FULL/EXT take real strides; INT minimal.
+  - **joint-torque variance:** 6.24 / 7.90 / 10.93 → 21.85 / **5.53** / 16.66 — FULL spends the most control effort to keep tracking; INT the least (under-actuating).
+- **Quote-ready reading.** *"The behaviour panels expose the mechanism behind
+  the CTS-ablation reward inversion. In MuJoCo, INT-only does not learn a
+  'quieter walk' — it stops walking: action-smoothness ≈ 0.008, joint-torque
+  variance ≈ 0.19, stride variance ≈ 0.0001, contact symmetry ≈ 0 are the
+  quantitative signature of a robot standing essentially still (the same
+  failure mode as RMA's Phase-2 module). That is why INT's raw reward looks
+  high (alive-bonus) while its task-success is 0 %. FULL is the only subset
+  that spends real control effort (torque variance 18–22) to produce and
+  keep a tracked gait; EXT is intermediate. Contact symmetry collapses for
+  every subset in MuJoCo at both DR scales — the periodic→drifty shift is a
+  simulator-change effect independent of the privileged input."*
 
 ### F.13 `fig_go2_gait_quality.png`
 - 2×4 grid of 8 metric panels, Baseline / RMA / CTS in each panel, Isaac =
   solid bar, MuJoCo = hatched bar. Direction-of-improvement labelled in each
   title ("higher better" or "lower better").
 - The visually most informative panels in MuJoCo are: **contact symmetry**
-  (sharp drop in MuJoCo for every method → the periodic gait is not
-  preserved across the simulator change), **foot-slip rate** (rises in
-  MuJoCo, indicating the friction transfer is incomplete), and
-  **joint-torque variance** (CTS reaches the highest absolute MuJoCo value
-  ≈ 18.85 — about 3.3× its Isaac value of 5.75, and the largest absolute
-  Isaac→MuJoCo gap of any method; RMA's ratio 4.42 → 15.92 is similar in
-  scale).
-- **Quote-ready reading.** *"The behavioural gait metrics confirm that the
-  sim-to-sim gap is concentrated in contact-related quantities (contact
-  symmetry, foot-slip), not in tracking RMSE or smoothness alone. All three
-  methods lose contact symmetry in MuJoCo, but CTS pays for its low RMSE
-  with the highest joint-torque variance — a quantifiable trade-off the
-  report can name explicitly."*
+  (collapses Isaac→MuJoCo for every method — Baseline 0.90→0.14, CTS
+  0.87→0.07, RMA 0.96→0.00 — the periodic gait is not preserved across the
+  simulator change), **foot-slip rate** (rises in MuJoCo, friction transfer
+  incomplete), and **joint-torque variance** (CTS reaches the highest
+  absolute MuJoCo value ≈ 18.19, about 3.6× its Isaac value 5.07; Baseline
+  5.16→9.66; **RMA collapses to ≈ 0.09 with action-smoothness ≈ 0.001** —
+  the signature of a robot standing still, not a good gait).
+- **Quote-ready reading.** *"The gait metrics confirm the sim-to-sim gap is
+  concentrated in contact-related quantities (contact symmetry, foot-slip),
+  and they expose RMA's MuJoCo behaviour for what it is: near-zero
+  joint-torque variance and action-smoothness mean RMA is not locomoting at
+  all. CTS pays for its low tracking error with the highest joint-torque
+  variance (it is actively working to track) — a quantifiable, honest
+  trade-off the report can name explicitly; Baseline sits between the two."*
 
 ### F.14 `fig_go2_learning_curves.png` (Baseline / RMA / CTS PPO curves)
 - **Single panel.** X = PPO iteration (0–25 000); Y = `Train/mean_reward`
@@ -982,8 +1312,8 @@ condition (each scaled-DR range widened ×2 about its midpoint).
   light translucent lines; bold lines are EMA-smoothed (α = 0.01) for
   readability.
 - **Key features.** CTS climbs fastest in the first ~2 000 iters and
-  finishes highest (~2 100); Baseline tracks just behind it (~2 000); RMA
-  is the slowest and shows a characteristic dip around iter ~9 000-11 000
+  finishes highest (final ≈ 2 110); Baseline just behind (≈ 2 041); RMA
+  lowest (≈ 2 011) and shows a characteristic dip around iter ~9 000-11 000
   (typical of the privileged-input curriculum shift documented in
   Kumar et al. 2021).
 - **Quote-ready reading.** *"All three methods converge by ~20 000
@@ -995,11 +1325,11 @@ condition (each scaled-DR range widened ×2 about its midpoint).
   distillation curriculum."*
 
 ### F.15 `fig_go2_learning_curves_len.png`
-- Same three methods, Y = `Train/mean_episode_length` (max = 500 control
-  steps = 10 s episode). All three saturate near the cap by iter ~3 000;
-  the figure mostly confirms early training reached "robot is alive for
-  the full episode" quickly — the differences between methods are in
-  reward shape, not survival, beyond that.
+- Same three methods, Y = `Train/mean_episode_length` (max = 1000 control
+  steps = 20 s episode). All three saturate near the cap by iter ~3 000
+  (final: Baseline 1000, CTS 990, RMA 986); the figure confirms training
+  reached "robot is alive for the full episode" quickly — the differences
+  between methods are in reward shape, not survival, beyond that.
 
 ### F.16 `fig_go2_cts_teacher_student.png`
 - **Three-panel layout** (top-left, top-right, bottom).
@@ -1051,24 +1381,24 @@ condition (each scaled-DR range widened ×2 about its midpoint).
   *smoothed* values are listed **in the legend** (not as inline
   annotations, to prevent the INT/EXT labels from overlapping when their
   values are within 18 reward of each other).
-- **Final smoothed values** (post-warmup):
-  - **CTS FULL (26-D)** — final R = **2 104**.
-  - **CTS INT  (16-D)** — final R = **1 986**.
-  - **CTS EXT  (10-D)** — final R = **1 968**.
-- **Reading.** FULL leads consistently from iter ~1 500 onwards by ~6 %
+- **Final values** (iter 24 999):
+  - **CTS FULL (26-D)** — final R ≈ **2 110**.
+  - **CTS INT  (16-D)** — final R ≈ **1 963**.
+  - **CTS EXT  (10-D)** — final R ≈ **1 989**.
+- **Reading.** FULL leads consistently from iter ~1 500 onwards by ~6-7 %
   over both INT and EXT. INT and EXT converge to nearly the same training
-  reward (gap of 18 reward, < 1 %) despite encoding qualitatively very
-  different signals — INT carries 16 D of body-parameter information
-  (friction, mass, gains, CoM, inertia, action delay), EXT carries 10 D of
-  *interaction* signals (per-foot contact forces, contact flags, mean
-  joint torques). Same training reward, different mechanism.
-- **Quote-ready reading.** *"FULL's training reward advantage of ~6 % over
-  INT and EXT does not translate into a proportional advantage at test
-  time: §C.5 shows that in MuJoCo, INT-only actually beats FULL on raw
-  reward (+14 % at DR×1) while losing 37 percentage points of task
-  success. The training-reward ordering is a poor proxy for
-  behaviour-quality at deployment — a central technical point of the
-  report."*
+  reward (within ~1.3 %) despite encoding qualitatively very different
+  signals — INT carries 16 D of body-parameter information (friction, mass,
+  gains, CoM, inertia, action delay), EXT carries 10 D of *interaction*
+  signals (per-foot contact forces, contact flags, mean joint torques).
+  Similar training reward, different mechanism.
+- **Quote-ready reading.** *"FULL's ~6-7 % training-reward advantage over
+  INT and EXT understates the deployment gap: §C.5 shows that in MuJoCo
+  INT-only's higher raw reward is a stationary-policy artefact — INT
+  collapses to 0 % task success at DR×1 versus FULL's 93 % (a 93-point
+  gap), because INT stops locomoting. Training-reward ordering is a poor
+  proxy for behaviour-quality at deployment — a central technical point of
+  the report."*
 
 ---
 

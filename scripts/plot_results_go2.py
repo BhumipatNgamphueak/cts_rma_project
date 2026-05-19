@@ -74,12 +74,16 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR   = os.path.join(REPO_ROOT, "results", "figures")
 
 # Canonical method order / colours / markers (matches OpenTopic palette)
-METHOD_ORDER  = ["BASELINE", "RMA", "CTS"]
-METHOD_LABEL  = {"BASELINE": "Baseline", "RMA": "RMA", "CTS": "CTS"}
-METHOD_COLOR  = {"BASELINE": "#2166ac",   # blue  (OpenTopic "Baseline")
-                 "RMA":      "#4dac26",   # green (OpenTopic "TXL-Random")
-                 "CTS":      "#d6604d"}   # red   (OpenTopic "TXL")
-METHOD_MARKER = {"BASELINE": "o", "RMA": "s", "CTS": "^"}
+METHOD_ORDER  = ["BASELINE", "RMA_TEACHER", "RMA", "CTS"]
+METHOD_LABEL  = {"BASELINE":    "Baseline",
+                 "RMA_TEACHER": "RMA Teacher",
+                 "RMA":         "RMA Student",
+                 "CTS":         "CTS"}
+METHOD_COLOR  = {"BASELINE":    "#2166ac",   # blue
+                 "RMA_TEACHER": "#762a83",   # purple  (oracle upper-bound)
+                 "RMA":         "#4dac26",   # green
+                 "CTS":         "#d6604d"}   # red
+METHOD_MARKER = {"BASELINE": "o", "RMA_TEACHER": "D", "RMA": "s", "CTS": "^"}
 PRIV_ORDER    = ["BASE", "INT", "EXT", "FULL"]
 PRIV_COLOR    = {"BASE": "#999999", "INT": "#4575b4", "EXT": "#f46d43", "FULL": "#1a9850"}
 SIM_COLOR     = {"isaac": "#2166ac", "mujoco": "#d6604d"}
@@ -144,9 +148,23 @@ def _normalise(df: pd.DataFrame, source: str) -> pd.DataFrame:
     if "latent_dim" not in df.columns:
         df["latent_dim"] = "8"
     df["latent_dim"] = df["latent_dim"].astype(str).str.strip()
+    # pandas infers an all-numeric latent column as float -> astype(str) gives
+    # "8.0"; an object column (mixed with "N/A") gives "8". Canonicalise so the
+    # (method, priv, latent) join matches across the ood and sim2sim frames.
+    df["latent_dim"] = df["latent_dim"].str.replace(r"\.0$", "", regex=True)
     df.loc[df["latent_dim"].isin(["", "nan", "N/A", "NaN", "None"]), "latent_dim"] = "—"
     df["source"] = source
     df = df.dropna(subset=["mean_reward", "dr_scale"])
+    # Deduplicate: when the same (method, priv, latent, dr_scale) appears more
+    # than once (e.g. old pre-fix run + new v2fix run), keep only the newest row
+    # so that retrained checkpoints supersede earlier eval results.
+    if "timestamp" in df.columns:
+        df = df.copy()
+        df["_ts"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        df = df.sort_values("_ts", ascending=False)
+        dedup_keys = ["method", "priv_mode", "latent_dim", "dr_scale"]
+        df = df.groupby(dedup_keys, as_index=False).first().reset_index(drop=True)
+        df = df.drop(columns=["_ts"])
     return df
 
 
@@ -154,7 +172,25 @@ def load_csv(path: str, source: str) -> pd.DataFrame:
     if not path or not os.path.exists(path):
         return pd.DataFrame()
     try:
-        df = pd.read_csv(path, keep_default_na=False, na_values=[""])
+        import io
+        with open(path, "r") as f:
+            lines = f.readlines()
+        if lines:
+            n_header = len(lines[0].split(","))
+            fixed = [lines[0]]
+            for ln in lines[1:]:
+                cols = ln.rstrip("\n").split(",")
+                if len(cols) > n_header:
+                    # Newer eval runs accidentally inserted extra string fields
+                    # (e.g. "terrain", "dist") between dr_scale and episode_length_s.
+                    # Drop excess columns right after the 5th field (dr_scale).
+                    excess = len(cols) - n_header
+                    del cols[5:5 + excess]
+                fixed.append(",".join(cols) + "\n")
+            df = pd.read_csv(io.StringIO("".join(fixed)),
+                             keep_default_na=False, na_values=[""])
+        else:
+            df = pd.read_csv(path, keep_default_na=False, na_values=[""])
     except Exception as e:                                   # noqa: BLE001
         print(f"[plot] WARN could not read {path}: {e}")
         return pd.DataFrame()
@@ -215,7 +251,10 @@ def scan_log_txt_reports() -> pd.DataFrame:
 def _save(fig, name: str):
     os.makedirs(OUT_DIR, exist_ok=True)
     for ext in ("pdf", "png"):
-        fig.savefig(os.path.join(OUT_DIR, f"{name}.{ext}"), bbox_inches="tight")
+        try:
+            fig.savefig(os.path.join(OUT_DIR, f"{name}.{ext}"), bbox_inches="tight")
+        except Exception as e:
+            print(f"[plot] WARN could not save {name}.{ext}: {e}")
     plt.close(fig)
     print(f"[plot] wrote {name}.pdf / .png")
 
@@ -245,14 +284,21 @@ def _figure_legend(fig, methods_present, include_dr=True, include_sim=False,
 
 
 def _headline(df: pd.DataFrame) -> pd.DataFrame:
-    """Headline config = the FULL / l=8 (or 'best available') row per method."""
+    """Headline config = the FULL / l=8 (or 'best available') row per method.
+    When duplicate (method, dr_scale, priv, latent) rows exist, the most recent
+    timestamp is preferred so v2fix checkpoint results supersede earlier runs."""
     if df.empty:
         return df
     d = df.copy()
     d["_priv_rank"] = d["priv_mode"].map({"BASE": 0, "FULL": 1, "INT": 2, "EXT": 3}).fillna(9)
     d["_lat"]       = pd.to_numeric(d["latent_dim"], errors="coerce")
     d["_lat_rank"]  = (d["_lat"] - 8).abs().fillna(99)   # prefer latent 8
-    d = d.sort_values(["method", "dr_scale", "_priv_rank", "_lat_rank"])
+    if "timestamp" in d.columns:
+        d["_ts"] = pd.to_datetime(d["timestamp"], errors="coerce")
+        d = d.sort_values(["method", "dr_scale", "_priv_rank", "_lat_rank", "_ts"],
+                           ascending=[True, True, True, True, False])
+    else:
+        d = d.sort_values(["method", "dr_scale", "_priv_rank", "_lat_rank"])
     return d.groupby(["method", "dr_scale"], as_index=False).first()
 
 
@@ -297,26 +343,41 @@ def fig_headline(ood: pd.DataFrame, sim: pd.DataFrame):
             mark     = "✓" if passed else "✗"
             stamp    = "PASS" if passed else "FAIL"
 
-            ax.bar(x[i] + offset, ret, w,
-                   color=METHOD_COLOR[m],
-                   hatch=COND_HATCH.get(dr, ""), alpha=COND_ALPHA.get(dr, 1.0),
-                   edgecolor=edge_col, linewidth=2.8, zorder=2)
-
-            # PASS/FAIL chip placed clearly ABOVE the bar, NOT inside.
-            ax.annotate(f"{mark} {stamp}",
-                        xy=(x[i] + offset, ret + 2.5),
-                        ha="center", va="bottom",
-                        fontsize=10, fontweight="bold",
-                        color="white",
-                        bbox=dict(boxstyle="round,pad=0.30",
-                                  facecolor=edge_col, edgecolor="none"),
-                        zorder=4)
-            # Big % number above the chip.
-            ax.annotate(f"{ret:.0f}%",
-                        xy=(x[i] + offset, ret + 13),
-                        ha="center", va="bottom",
-                        fontsize=14, fontweight="bold", color="0.15",
-                        zorder=4)
+            if ret >= 0:
+                ax.bar(x[i] + offset, ret, w,
+                       color=METHOD_COLOR[m],
+                       hatch=COND_HATCH.get(dr, ""), alpha=COND_ALPHA.get(dr, 1.0),
+                       edgecolor=edge_col, linewidth=2.8, zorder=2)
+                # PASS/FAIL chip placed clearly ABOVE the bar.
+                ax.annotate(f"{mark} {stamp}",
+                            xy=(x[i] + offset, ret + 2.5),
+                            ha="center", va="bottom",
+                            fontsize=10, fontweight="bold",
+                            color="white",
+                            bbox=dict(boxstyle="round,pad=0.30",
+                                      facecolor=edge_col, edgecolor="none"),
+                            zorder=4)
+                # Big % number above the chip.
+                ax.annotate(f"{ret:.0f}%",
+                            xy=(x[i] + offset, ret + 13),
+                            ha="center", va="bottom",
+                            fontsize=14, fontweight="bold", color="0.15",
+                            zorder=4)
+            else:
+                # Negative retention (catastrophic failure): draw a downward
+                # arrow from the x-axis with the actual value annotated.
+                ax.annotate("",
+                            xy=(x[i] + offset, 0),
+                            xytext=(x[i] + offset, 8),
+                            arrowprops=dict(arrowstyle="-|>", color=fail_col,
+                                            lw=2.5), zorder=4)
+                ax.annotate(f"✗ FAIL\n{ret:.0f}%",
+                            xy=(x[i] + offset, 9),
+                            ha="center", va="bottom",
+                            fontsize=9, fontweight="bold", color="white",
+                            bbox=dict(boxstyle="round,pad=0.30",
+                                      facecolor=fail_col, edgecolor="none"),
+                            zorder=4)
 
     # Spec threshold line + label placed in the LEFT margin (no bar there).
     ax.axhline(threshold, color="0.2", lw=1.8, ls="--", alpha=0.85, zorder=1)
@@ -482,31 +543,57 @@ def fig_sim2sim_transfer(ood: pd.DataFrame, sim: pd.DataFrame):
     # ── (A) Reward retention G(π) at each DR scale ────────────────────────
     ax = axes[0]
     x = np.arange(len(methods_present)); w = 0.80 / len(dr_scales)
-    # Threshold line + LEFT-margin label (no overlap with rightmost bar).
+    fail_col = "#b2182b"
+    # Pre-compute all retention values to set a sensible y range.
+    all_rets = []
+    for k, dr in enumerate(dr_scales):
+        for m in methods_present:
+            r_iso, _ = _r(ood, m, dr); r_muj, _ = _r(sim, m, dr)
+            if r_iso and r_iso > 1e-6 and not np.isnan(r_muj):
+                all_rets.append(100.0 * r_muj / r_iso)
+    y_min_A = min(0, min(all_rets) * 1.10) if all_rets else 0
+    y_max_A = 130
     ax.axhline(60.0, color="0.2", lw=1.4, ls="--", alpha=0.8, zorder=1)
-    ax.text(-0.55, 60.0, " 60% spec ",
+    ax.text(-0.70, 60.0, " 60% spec ",
             va="center", ha="right", fontsize=9, fontstyle="italic",
             bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="0.5"))
     ax.axhline(100.0, color="0.5", lw=0.7, ls=":", alpha=0.5, zorder=1)
+    ax.axhline(0.0, color="0.3", lw=0.8, alpha=0.6, zorder=1)
     for k, dr in enumerate(dr_scales):
         offset = (k - (len(dr_scales) - 1) / 2) * w
         for i, m in enumerate(methods_present):
             r_iso, _ = _r(ood, m, dr)
             r_muj, _ = _r(sim, m, dr)
-            ret = 100.0 * r_muj / r_iso if r_iso and r_iso > 1e-6 and not np.isnan(r_muj) else np.nan
-            ax.bar(x[i] + offset, ret, w,
-                   color=METHOD_COLOR[m], hatch=COND_HATCH.get(dr, ""),
-                   alpha=COND_ALPHA.get(dr, 1.0),
-                   edgecolor="white", linewidth=0.6, zorder=2)
-            if not np.isnan(ret):
+            if not (r_iso and r_iso > 1e-6 and not np.isnan(r_muj)):
+                continue
+            ret = 100.0 * r_muj / r_iso
+            if ret >= 0:
+                ax.bar(x[i] + offset, ret, w,
+                       color=METHOD_COLOR[m], hatch=COND_HATCH.get(dr, ""),
+                       alpha=COND_ALPHA.get(dr, 1.0),
+                       edgecolor="white", linewidth=0.6, zorder=2)
                 ax.annotate(f"{ret:.0f}%",
                             xy=(x[i] + offset, ret + 3),
                             ha="center", va="bottom",
                             fontsize=10, fontweight="bold", color="0.15", zorder=3)
-    ax.set_xticks(x); ax.set_xticklabels([METHOD_LABEL[m] for m in methods_present])
+            else:
+                # Negative retention: bar below zero, FAIL chip at axis crossing.
+                ax.bar(x[i] + offset, ret, w,
+                       color=METHOD_COLOR[m], hatch=COND_HATCH.get(dr, ""),
+                       alpha=COND_ALPHA.get(dr, 1.0),
+                       edgecolor=fail_col, linewidth=1.5, zorder=2)
+                ax.annotate(f"✗ {ret:.0f}%",
+                            xy=(x[i] + offset, -4),
+                            ha="center", va="top",
+                            fontsize=9, fontweight="bold", color="white",
+                            bbox=dict(boxstyle="round,pad=0.25",
+                                      facecolor=fail_col, edgecolor="none"),
+                            zorder=4)
+    ax.set_xticks(x)
+    ax.set_xticklabels([METHOD_LABEL[m] for m in methods_present], rotation=15, ha="right")
     ax.set_ylabel("MuJoCo reward / Isaac reward  [%]")
     ax.set_title("(A)  Sim-to-sim retention  G($\\pi$, $s$)", fontweight="bold")
-    ax.set_ylim(0, 125)
+    ax.set_ylim(y_min_A, y_max_A)
     ax.set_xlim(-0.7, len(methods_present) - 0.3)
     # (legend placed at figure-level — see _figure_legend call near the end)
 
@@ -654,7 +741,10 @@ def fig_gait_quality(ood: pd.DataFrame, sim: pd.DataFrame):
                        hatch=sim_style[simlabel]["hatch"],
                        alpha=sim_style[simlabel]["alpha"],
                        edgecolor="white", linewidth=0.4)
-        ax.set_xticks(x); ax.set_xticklabels([METHOD_LABEL[m] for m in methods_present], fontsize=7)
+        # Use short two-line labels so "RMA Teacher" fits without truncation.
+        short = [METHOD_LABEL[m].replace("RMA Teacher", "RMA\nTeacher")
+                                 .replace("RMA Student", "RMA\nStudent") for m in methods_present]
+        ax.set_xticks(x); ax.set_xticklabels(short, fontsize=7)
         ax.set_title(f"{title}\n({direction})", fontsize=8)
         ax.tick_params(axis="y", labelsize=7)
 
@@ -853,7 +943,7 @@ def _fig_cts_priv_ablation_gait_one(df: pd.DataFrame, privs_present, sims_presen
                        hatch=sim_style[sim_tag]["hatch"],
                        alpha=sim_style[sim_tag]["alpha"],
                        edgecolor="white", linewidth=0.4)
-        ax.set_xticks(x); ax.set_xticklabels(privs_present, fontsize=8)
+        ax.set_xticks(x); ax.set_xticklabels(privs_present, fontsize=8, rotation=0)
         ax.set_title(f"{title}\n({direction})", fontsize=8)
         ax.tick_params(axis="y", labelsize=7)
 
@@ -962,6 +1052,79 @@ def compute_transfer_gaps(ood: pd.DataFrame, sim: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def fig_rma_phase2_loss(lc_path: str | None = None):
+    """Plot RMA Phase-2 MSE loss (adaptation module, teacher→student gap).
+
+    Reads results/learning_curves_go2.csv (or the path given) for method==RMA_Phase2.
+    Shows the full training curve with a rolling mean and annotates convergence level.
+    """
+    import csv as _csv, io as _io
+
+    if lc_path is None:
+        lc_path = os.path.join(REPO_ROOT, "results", "learning_curves_go2.csv")
+    if not os.path.exists(lc_path):
+        print(f"[plot] skip fig_rma_phase2_loss — {lc_path} not found")
+        return
+
+    # Load only Phase-2 rows
+    iters, losses = [], []
+    with open(lc_path) as f:
+        reader = _csv.DictReader(f)
+        for row in reader:
+            if row.get("method") == "RMA_Phase2" and row.get("mse_loss", ""):
+                try:
+                    iters.append(int(row["iteration"]))
+                    losses.append(float(row["mse_loss"]))
+                except ValueError:
+                    pass
+
+    if not iters:
+        print("[plot] skip fig_rma_phase2_loss — no RMA_Phase2 rows in learning_curves_go2.csv")
+        return
+
+    iters  = np.array(iters)
+    losses = np.array(losses)
+
+    # Rolling mean (window=50)
+    win = 50
+    padded = np.pad(losses, (win // 2, win - 1 - win // 2), mode="edge")
+    roll   = np.convolve(padded, np.ones(win) / win, mode="valid")
+
+    # Reference: teacher has MSE = 0 by definition; we annotate the plateau
+    plateau_mean = float(np.mean(losses[-100:]))
+    first_loss   = float(losses[0])
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+
+    # Raw curve (faded)
+    ax.plot(iters, losses, color="#aaaaaa", lw=0.6, alpha=0.55, label="Per-iteration MSE")
+    # Rolling mean
+    ax.plot(iters, roll, color=METHOD_COLOR["RMA"], lw=2.0, label=f"Rolling mean (w={win})")
+
+    # Horizontal reference lines
+    ax.axhline(0.0, color="black", lw=1.0, ls="--", alpha=0.5, label="Teacher (oracle, MSE = 0)")
+    ax.axhline(plateau_mean, color="#d6604d", lw=1.2, ls=":",
+               label=f"Student plateau ≈ {plateau_mean:.3f}")
+
+    # Gap annotation with a double-headed arrow
+    mid_iter = iters[len(iters) // 2]
+    ax.annotate("", xy=(mid_iter, 0), xytext=(mid_iter, plateau_mean),
+                arrowprops=dict(arrowstyle="<->", color="#762a83", lw=1.8))
+    ax.text(mid_iter + len(iters) * 0.01, plateau_mean / 2,
+            f"Gap ≈ {plateau_mean:.3f}", va="center", color="#762a83", fontsize=9)
+
+    ax.set_xlabel("Phase-2 Iteration")
+    ax.set_ylabel("MSE Loss  (teacher z vs student ẑ)")
+    ax.set_title("RMA Phase-2: Adaptation Module Training\n"
+                 "(teacher = oracle encoder, student = history-based encoder)")
+    ax.set_ylim(-0.05, max(losses) * 1.15)
+    ax.legend(loc="upper right", fontsize=9)
+    fig.tight_layout()
+    _save(fig, "fig_go2_rma_phase2_loss")
+    print(f"[plot] fig_go2_rma_phase2_loss  plateau={plateau_mean:.4f}  "
+          f"init={first_loss:.4f}  iters={len(iters)}")
+
+
 def _pass(value, threshold):
     """Return a "PASS"/"FAIL"/"—" marker for a numeric value against a >= threshold."""
     if value is None or (isinstance(value, float) and np.isnan(value)):
@@ -996,18 +1159,20 @@ def fig_comparison_matrix(ood: pd.DataFrame, sim: pd.DataFrame):
         if not len(sub): return np.nan, np.nan
         return float(sub["mean_reward"].iloc[0]), float(sub["std_reward"].iloc[0])
 
-    fig, axes = plt.subplots(2, 2, figsize=(12.0, 8.5), sharey=True)
-    x = np.arange(len(methods_present)); w = 0.38
+    fig, axes = plt.subplots(2, 2, figsize=(14.0, 9.0), sharey=True)
+    x = np.arange(len(methods_present)); w = 0.34
 
-    # Common y-axis upper limit (with breathing room for annotations).
-    all_vals = []
+    # Common y-axis limits — handle negative rewards (e.g. RMA Student in MuJoCo).
+    all_means, all_tops = [], []
     for m in methods_present:
         for df in (ood, sim):
             for s in dr_scales:
                 v, e = _r(df, m, s)
-                if not np.isnan(v): all_vals.append(v + e)
-    y_top = max(all_vals) * 1.25 if all_vals else 1500
-    y_min = 0
+                if not np.isnan(v):
+                    all_means.append(v)
+                    all_tops.append(v + e)
+    y_top = max(all_tops) * 1.25 if all_tops else 1500
+    y_min = min(0, min(all_means) * 1.15) if all_means else 0
 
     def _panel(ax, title_prefix, title_q, left, right, left_lbl, right_lbl,
                annot_prefix="Δ"):
@@ -1120,9 +1285,9 @@ def _4view_bar_panel(ax, methods_present, left_pairs, right_pairs,
                      title, left_lbl, right_lbl, ylabel,
                      threshold=None, threshold_label=None, threshold_cmp=">=",
                      value_fmt="{:.0f}", y_max=None, error_bars=False):
-    """Generic 4-view bar panel: 3 methods × 2 bars (left, right). Used by survival /
+    """Generic 4-view bar panel: methods × 2 bars (left, right). Used by survival /
     vel-RMSE / generic single-value comparisons."""
-    x = np.arange(len(methods_present)); w = 0.38
+    x = np.arange(len(methods_present)); w = 0.34
     if threshold is not None:
         ax.axhline(threshold, color="0.2", lw=1.4, ls="--", alpha=0.8, zorder=1)
         ax.text(-0.55, threshold, f" {threshold_label} ",
@@ -1178,7 +1343,7 @@ def _fig_metric_4view(ood, sim, value_col, std_col, title_metric, ylabel,
     dr_lo, dr_hi = dr_scales[0], dr_scales[-1]
     panels = _4view_pairs(ood, sim, methods_present, dr_lo, dr_hi, value_col, std_col)
 
-    fig, axes = plt.subplots(2, 2, figsize=(12.0, 8.5), sharey=True)
+    fig, axes = plt.subplots(2, 2, figsize=(14.0, 9.0), sharey=True)
     titles = {
         "A_isaac_ood":  f"(A)  Isaac OOD:  DR×{dr_lo:g} vs DR×{dr_hi:g}",
         "B_mujoco_ood": f"(B)  MuJoCo OOD:  DR×{dr_lo:g} vs DR×{dr_hi:g}",
@@ -1262,7 +1427,7 @@ def fig_comparison_outcome(ood, sim):
         return float(sub[col].iloc[0])
 
     def _stacked_panel(ax, left_get, right_get, title, left_lbl, right_lbl):
-        x = np.arange(len(methods_present)); w = 0.38
+        x = np.arange(len(methods_present)); w = 0.34
         # Left bar = first condition; right bar = second condition.
         for i, m in enumerate(methods_present):
             for side, getfn in [(-w/2, left_get), (+w/2, right_get)]:
@@ -1290,7 +1455,7 @@ def fig_comparison_outcome(ood, sim):
                 bbox=dict(boxstyle="round,pad=0.30",
                           facecolor="white", edgecolor="0.7", alpha=0.85))
 
-    fig, axes = plt.subplots(2, 2, figsize=(12.0, 8.5), sharey=True)
+    fig, axes = plt.subplots(2, 2, figsize=(14.0, 9.0), sharey=True)
     _stacked_panel(axes[0, 0],
                    lambda m, c: _v(ood, m, dr_lo, c), lambda m, c: _v(ood, m, dr_hi, c),
                    f"(A)  Isaac OOD:  DR×{dr_lo:g} vs DR×{dr_hi:g}",
@@ -1556,8 +1721,8 @@ def fig_summary_dashboard(ood: pd.DataFrame, sim: pd.DataFrame):
     # Figure-level legend BELOW all 4 panels — methods + DR scale.
     methods_in_data = [m for m in METHOD_ORDER if m in set(data["method"])]
     _figure_legend(fig, methods_in_data, include_dr=True, y=0.01, fontsize=10)
-    fig.suptitle("Go2 (Phase 2) — Spec-sheet summary    "
-                 "Baseline / RMA / CTS  ·  FULL · $Z$=8  ·  30 ep × {1×, 2×} DR × {Isaac, MuJoCo}",
+    fig.suptitle("Go2 — Spec-sheet summary    "
+                 "Baseline / RMA Teacher / RMA Student / CTS  ·  FULL · $Z$=8  ·  DR×{1, 2} × {Isaac, MuJoCo}",
                  fontsize=11, fontweight="bold")
     fig.tight_layout(rect=[0, 0.04, 1, 0.95])
     _save(fig, "fig_go2_summary")
@@ -1806,6 +1971,7 @@ def main():
     fig_cts_priv_ablation(ood, sim)          # CTS-only 4-view ablation (NEW)
     fig_cts_priv_ablation_gait(ood, sim)     # CTS-only gait-quality ablation (NEW)
     fig_gait_quality(ood, sim)
+    fig_rma_phase2_loss()                     # teacher-student gap via Phase-2 MSE
     write_tables(ood, sim)
     write_cts_priv_ablation_table(ood, sim)  # NEW
     print(f"\n[plot] done — figures in {os.path.relpath(OUT_DIR, REPO_ROOT)}/")

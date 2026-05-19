@@ -6,6 +6,7 @@ Phase 1 uses standard OnPolicyRunner (see scripts/rma/train_phase1.py).
 Phase 2 trains AdaptationModule φ to regress z_t = μ(e_t) from obs/action history.
 """
 
+import csv
 import os
 import torch
 import torch.nn as nn
@@ -50,6 +51,14 @@ class RMAPhase2Runner:
         self.optimizer = Adam(self.adapt_module.parameters(), lr=learning_rate)
         self.loss_fn   = nn.MSELoss()
 
+        # First `stat_warmup` iters collect teacher latents WITHOUT updating φ,
+        # to estimate per-dim mean/std of z_true. φ is then trained to regress
+        # the *standardised* target (well-conditioned MSE) and de-normalises at
+        # deployment via the z_mean/z_std buffers. Without this the unregularised
+        # env_encoder output (|z|~48) makes MSE collapse to a constant.
+        self.stat_warmup = 10
+        self._z_accum    = []
+
         N = env.num_envs
         self.state_hist  = torch.zeros(N, history_len, state_dim, device=device)
         self.action_hist = torch.zeros(N, history_len, 12, device=device)
@@ -68,6 +77,11 @@ class RMAPhase2Runner:
         self.rma.eval()  # freeze base policy and env encoder
         for param in self.rma.parameters():
             param.requires_grad_(False)
+
+        csv_path = os.path.join(self.log_dir, "phase2_loss.csv")
+        csv_file = open(csv_path, "w", newline="")
+        csv_writer = csv.writer(csv_file)
+        csv_writer.writerow(["iteration", "mse_loss"])
 
         for iteration in range(self.num_iters):
             # === Collect on-policy data using current ẑ ===
@@ -110,27 +124,50 @@ class RMAPhase2Runner:
             actions = torch.stack(collected_actions, dim=1).flatten(0, 1)   # [steps*N, H, 12]
             z_truth = torch.cat(collected_z_true, dim=0)                    # [steps*N, 8]
 
+            # === Stat-warmup: estimate teacher-latent mean/std, no φ update ===
+            if iteration < self.stat_warmup:
+                self._z_accum.append(z_truth.detach())
+                if iteration == self.stat_warmup - 1:
+                    allz = torch.cat(self._z_accum, dim=0)
+                    self.adapt_module.z_mean.copy_(allz.mean(0))
+                    self.adapt_module.z_std.copy_(allz.std(0).clamp_min(1e-6))
+                    self._z_accum = []
+                    print(f"[Phase 2] z-stats set after {self.stat_warmup} iters | "
+                          f"|mean|={self.adapt_module.z_mean.norm():.2f} "
+                          f"|std|={self.adapt_module.z_std.norm():.2f}")
+                continue
+
+            # Standardised regression target (de-normalised at deployment)
+            z_tgt = (z_truth - self.adapt_module.z_mean) / self.adapt_module.z_std
+
             # Mini-batch update
             idx      = torch.randperm(states.shape[0], device=self.device)
             mb_size  = states.shape[0] // 4
+            mb_losses = []
 
             for i in range(4):
                 mb_idx = idx[i*mb_size:(i+1)*mb_size]
-                z_pred = self.adapt_module(states[mb_idx], actions[mb_idx])
-                loss   = self.loss_fn(z_pred, z_truth[mb_idx])
+                z_pred = self.adapt_module.core(states[mb_idx], actions[mb_idx])
+                loss   = self.loss_fn(z_pred, z_tgt[mb_idx])
 
                 self.optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.adapt_module.parameters(), 1.0)
                 self.optimizer.step()
+                mb_losses.append(loss.item())
+
+            mean_loss = sum(mb_losses) / len(mb_losses)
+            csv_writer.writerow([iteration, f"{mean_loss:.6f}"])
+            csv_file.flush()
 
             if iteration % 50 == 0:
-                print(f"[Phase 2 Iter {iteration:4d}] MSE loss = {loss.item():.6f}")
+                print(f"[Phase 2 Iter {iteration:4d}] MSE loss = {mean_loss:.6f}")
 
             if iteration % 200 == 0:
                 torch.save(self.adapt_module.state_dict(),
                            os.path.join(self.log_dir, f"adapt_module_{iteration}.pt"))
 
         print("[Phase 2] Training complete.")
+        csv_file.close()
         torch.save(self.adapt_module.state_dict(),
                    os.path.join(self.log_dir, "adapt_module_final.pt"))

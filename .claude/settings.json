@@ -33,7 +33,11 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\('scripts/sim2sim/sim2sim_go2.py'\\).read\\(\\)\\); print\\('parse OK'\\)\")",
       "Bash(awk -F',' 'NR==1 || $2==\"CTS\"' /home/drl-68/t_s_policy/cts_rma_project/results/ood_go2.csv)",
       "Bash(awk -F',' 'NR==1 || $2==\"CTS\"' /home/drl-68/t_s_policy/cts_rma_project/results/sim2sim_go2.csv)",
-      "Bash(python)"
+      "Bash(python)",
+      "Bash(python scripts/plot_results_one_leg.py --ood results/ood_one_leg.csv)",
+      "Bash(awk '{print $NF}')",
+      "Bash(grep -nA1 \"SIM2SIM FIX\" source/cts_rma_project/cts_rma_project/tasks/shared/shared_env_cfg.py)",
+      "Bash(grep -nA1 \"SIM2SIM FIX\\\\|cts_lambda_rec\\\\|cts_rec_warmup\\\\|cts_rec_lr\" source/cts_rma_project/cts_rma_project/tasks/cts/agents/rsl_rl_ppo_cfg.py)"
     ],
     "additionalDirectories": [
       "/home/drl-68/t_s_policy/cts_rma_project/results/figures"

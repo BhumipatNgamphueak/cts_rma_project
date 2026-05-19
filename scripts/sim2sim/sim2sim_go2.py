@@ -423,6 +423,50 @@ def get_obs(m: mujoco.MjModel, d: mujoco.MjData,
     ]).astype(np.float32)
 
 
+# ── Privileged obs (teacher/oracle) ──────────────────────────────────────────
+
+def get_priv_obs_sim2sim(m: "mujoco.MjModel", d: "mujoco.MjData",
+                         dr_params: dict, joint_perm: np.ndarray) -> np.ndarray:
+    """Approximate x_t = x_int(16) ⊕ x_ext(10) from MuJoCo state.
+
+    Matches Isaac Lab's privileged_internal_go2 + privileged_external_go2 layout.
+    Kp/Kd scale and action_delay are not randomised in sim2sim → set to 0 (nominal).
+    """
+    # ── x_int (16D) — episode-constant body params ────────────────────────────
+    friction    = np.array([dr_params.get("friction",        1.0)],  dtype=np.float32)
+    restitution = np.array([0.075],                                   dtype=np.float32)  # default
+    payload     = np.array([dr_params.get("mass_scale_base", 1.0) - 1.0], dtype=np.float32)
+    kp_scale    = np.zeros(3, dtype=np.float32)   # not randomised in sim2sim
+    kd_scale    = np.zeros(3, dtype=np.float32)
+    com_offset  = np.asarray(dr_params.get("com_offset", [0.0, 0.0, 0.0]), dtype=np.float32)
+    inertia_dev = np.array([dr_params.get("inertia_scale", 1.0) - 1.0] * 3, dtype=np.float32)
+    action_delay= np.zeros(1, dtype=np.float32)   # not randomised in sim2sim
+    x_int = np.concatenate([friction, restitution, payload,
+                             kp_scale, kd_scale, com_offset,
+                             inertia_dev, action_delay])              # [16]
+
+    # ── x_ext (10D) — timestep-varying interaction signals ────────────────────
+    # f_contact_sum(3): sum of net external forces on calf bodies (world frame XYZ)
+    f_contact_sum = np.zeros(3, dtype=np.float32)
+    for fi in range(4):
+        bid = LEG_BODY_IDS[fi][2]   # calf body carries the foot geom
+        f_contact_sum += d.cfrc_ext[bid, 3:6].astype(np.float32)  # cfrc_ext: [torque|force]
+
+    # c_bin(4): binary foot contact (FL FR RL RR)
+    c_bin = get_foot_contacts(m, d).astype(np.float32)
+
+    # tau_avg(3): mean |torque| per joint type (hip / thigh / calf) in Isaac order
+    tau_isaac = np.abs(d.actuator_force[joint_perm]).astype(np.float32)  # [12] Isaac order
+    tau_avg = np.array([
+        tau_isaac[[0, 3, 6, 9]].mean(),   # hips
+        tau_isaac[[1, 4, 7, 10]].mean(),  # thighs
+        tau_isaac[[2, 5, 8, 11]].mean(),  # calves
+    ], dtype=np.float32)
+
+    x_ext = np.concatenate([f_contact_sum, c_bin, tau_avg])              # [10]
+    return np.concatenate([x_int, x_ext])                                 # [26]
+
+
 # ── Control ────────────────────────────────────────────────────────────────────
 
 def compute_target_q(action: np.ndarray, inv_joint_perm: np.ndarray) -> np.ndarray:
@@ -700,6 +744,30 @@ def load_policy(method: str, checkpoint: str, device: str,
         print(f"[policy] RMA: latent_dim={latent_dim}  env_factor_dim={priv_dim}  (deployment mode, z=0)")
         return policy, None
 
+    elif method == "rma_teacher":
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "rma_network",
+            os.path.join(PROJECT_ROOT, "source", "cts_rma_project",
+                         "cts_rma_project", "tasks", "rma", "rma_network.py"),
+        )
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        RMAActorCritic = _mod.RMAActorCritic
+
+        policy = RMAActorCritic(
+            num_actor_obs=37,
+            num_critic_obs=critic_obs,
+            num_actions=12,
+            env_factor_dim=priv_dim,
+            latent_dim=latent_dim,
+        ).to(device)
+        policy.load_state_dict(sd, strict=False)
+        policy.eval()
+        print(f"[policy] RMA teacher: latent_dim={latent_dim}  env_factor_dim={priv_dim}  "
+              f"(z = env_encoder(x_t) — privileged oracle)")
+        return policy, None
+
     elif method == "cts":
         import importlib.util as _ilu
         _spec = _ilu.spec_from_file_location(
@@ -739,31 +807,57 @@ def load_policy(method: str, checkpoint: str, device: str,
         raise ValueError(f"Unknown method: {method}")
 
 
+def load_adapt_module(checkpoint: str, latent_dim: int = 8,
+                      history_len: int = 50, device: str = "cuda"):
+    """Load a Phase-2 RMA adaptation module from checkpoint.
+
+    Returns AdaptationModule in eval mode.
+    Checkpoint may be adapt_module_final.pt (bare state_dict) or a dict
+    with key 'adapt_module_state_dict'.
+    """
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location(
+        "rma_network",
+        os.path.join(PROJECT_ROOT, "source", "cts_rma_project",
+                     "cts_rma_project", "tasks", "rma", "rma_network.py"),
+    )
+    _mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    AdaptationModule = _mod.AdaptationModule
+
+    adapt = AdaptationModule(
+        state_dim=37, action_dim=12, embed_dim=32,
+        latent_dim=latent_dim, history_len=history_len,
+    ).to(device)
+
+    ckpt = torch.load(checkpoint, map_location=device, weights_only=False)
+    sd   = ckpt.get("adapt_module_state_dict", ckpt)
+    adapt.load_state_dict(sd)
+    adapt.eval()
+    print(f"[adapt] Phase-2 module loaded from: {checkpoint}")
+    return adapt
+
+
 # ── Pose reset ─────────────────────────────────────────────────────────────────
 
 def _reset_pose(m: mujoco.MjModel, d: mujoco.MjData, spawn_height: float,
                 randomize: bool = False, vel_cmd: np.ndarray | None = None):
-    """Reset robot pose to match Isaac Lab SharedEventCfg reset_base/reset_joints.
+    """Reset robot pose to match the v2 training reset distribution.
 
-    SharedEventCfg.reset_base ALWAYS applies random base XY+yaw + velocity
-    push at every reset. We match that here as the default behaviour:
-        XY              ±0.5 m       per axis  (already matched)
-        yaw             ±π                     (already matched)
-        base linear vel ±0.5 m/s     per axis   ← NEW
-        base angular vel ±1.0 rad/s  per axis   ← NEW
+    v2 training (after SIM2SIM FIX #1 in shared_env_cfg.py) zeroes the
+    reset_base.velocity_range, so the policy was trained from REST at every
+    episode. We mirror that here:
+        XY              ±0.5 m       per axis   (matches reset_base.pose_range)
+        yaw             ±π                      (matches reset_base.pose_range)
+        base linear vel  0                      (matches v2)
+        base angular vel 0                      (matches v2)
+        joint pos        DEFAULT_JOINT_POS      (no offset by default)
+        joint vel        0                      (no chaos by default)
 
-    Without the velocity push, the CTS student encoder sees a "perfectly
-    still" 50-frame history at episode start — a distribution it never saw
-    during training (training resets always have non-zero base velocity).
-    The encoder produces an OOD latent → actor outputs cautious "stand
-    still" actions → robot never starts walking. Baseline doesn't hit this
-    because it uses no temporal encoder.
-
-    randomize=True additionally adds the SharedEventCfg.reset_joints chaos:
+    randomize=True additionally adds SharedEventCfg.reset_joints chaos for
+    robustness probes:
         joint pos offset ±1.047 rad (±60°)
         joint vel        ±1.0   rad/s
-    Use this when you want to test recovery from extreme initial states
-    (matches training fully); the policy may take a few steps to stabilise.
     """
     mujoco.mj_resetData(m, d)
 
@@ -780,24 +874,18 @@ def _reset_pose(m: mujoco.MjModel, d: mujoco.MjData, spawn_height: float,
     d.qpos[7:19] = DEFAULT_JOINT_POS
     d.qvel[:]    = 0.0
 
-    # Bootstrap base velocity matching training's reset_base distribution.
-    # WHY: the CTS student encoder needs a non-zero starting velocity, otherwise
-    # its 50-frame history starts as "perfectly still" — a distribution it never
-    # saw in training (Isaac Lab's reset_base ALWAYS samples velocity in
-    # [-0.5, 0.5] m/s per axis). Without this, the encoder produces an OOD
-    # latent and the actor outputs cautious "stand still" actions.
-    # Baseline / RMA aren't affected (no temporal encoder).
-    # ang vel is kept small (±0.2 vs training's ±1.0) so random rotation
-    # doesn't overwhelm the forward-gait pattern in the encoder's first frames.
-    d.qvel[0:3] = np.random.uniform(-0.5, 0.5, 3)
-    d.qvel[3:6] = np.random.uniform(-0.2, 0.2, 3)
+    # NOTE: matches v2 training reset distribution.
+    # The shared_env_cfg.py SIM2SIM FIX (#1) zeroes velocity_range on reset_base
+    # so the v2 policies (Baseline / RMA / CTS) were trained with the robot
+    # starting at REST every episode. Any non-zero qvel push here would be OOD
+    # relative to training — leave qvel at zero (already set above by `qvel[:] = 0`).
+    # If you re-add a random push, retrain so training and deployment match.
 
     if randomize:
-        # Match SharedEventCfg.reset_joints (±1.047 rad, ±1.0 rad/s)
+        # Match SharedEventCfg.reset_joints (±1.047 rad, ±1.0 rad/s) — optional
+        # extreme-init test (--random_init) for robustness probes.
         d.qpos[7:19] += np.random.uniform(-1.047, 1.047, 12)
         d.qvel[6:18]  = np.random.uniform(-1.0,    1.0,   12)
-        # Full angular vel randomisation only with --random_init
-        d.qvel[3:6]   = np.random.uniform(-1.0, 1.0, 3)
 
     mujoco.mj_forward(m, d)
 
@@ -818,7 +906,7 @@ def _foot_lin_vel_world(d) -> np.ndarray:
 def run_episode(m, d, policy, method, device, dr: EpisodeDR,
                 joint_perm, inv_joint_perm, vel_cmd, max_steps, spawn_height,
                 history_len=None, no_dr=False, random_init=False,
-                no_terminate=False):
+                no_terminate=False, adapt_module=None):
     """Run one episode. Returns (total_reward, total_steps, done_reason,
     sum_lin_track, sum_ang_track, sum_track_err, gait_metrics_dict)."""
 
@@ -841,6 +929,20 @@ def run_episode(m, d, policy, method, device, dr: EpisodeDR,
     obs_hist = None
     if method == "cts" and history_len is not None:
         obs_hist = torch.zeros(1, history_len, 37, device=device)
+
+    # RMA Phase-2: adaptation module history buffers
+    rma_state_hist  = None
+    rma_action_hist = None
+    if method == "rma" and adapt_module is not None:
+        rma_state_hist  = torch.zeros(1, adapt_module.history_len, 37, device=device)
+        rma_action_hist = torch.zeros(1, adapt_module.history_len, 12, device=device)
+
+    # RMA Teacher: episode-constant x_int computed once after DR; x_ext updated per step
+    rma_teacher_dr_params = params if not no_dr else {}
+    rma_teacher_x_int = None
+    if method == "rma_teacher":
+        priv_full = get_priv_obs_sim2sim(m, d, rma_teacher_dr_params, joint_perm)
+        rma_teacher_x_int = priv_full[:16]   # reuse each step; only x_ext changes
 
     # Pose reset
     _reset_pose(m, d, spawn_height, randomize=random_init, vel_cmd=vel_cmd)
@@ -875,8 +977,23 @@ def run_episode(m, d, policy, method, device, dr: EpisodeDR,
                 policy_in = torch.cat([obs_hist.reshape(1, -1), flag], dim=1)
                 action_t  = policy.act_inference(policy_in)
             elif method == "rma":
-                obs_t    = torch.from_numpy(obs_np).unsqueeze(0).to(device)
-                action_t = policy.act_inference(obs_t)        # z=0 deployment mode
+                obs_t = torch.from_numpy(obs_np).unsqueeze(0).to(device)
+                if adapt_module is not None:
+                    rma_state_hist  = torch.roll(rma_state_hist,  -1, dims=1)
+                    rma_action_hist = torch.roll(rma_action_hist, -1, dims=1)
+                    rma_state_hist[0, -1, :]  = obs_t[0]
+                    z_hat    = adapt_module(rma_state_hist, rma_action_hist)
+                    action_t = policy.act_inference(obs_t, z_override=z_hat)
+                    rma_action_hist[0, -1, :] = action_t[0].detach()
+                else:
+                    action_t = policy.act_inference(obs_t)    # z=0 deployment mode
+            elif method == "rma_teacher":
+                obs_t  = torch.from_numpy(obs_np).unsqueeze(0).to(device)
+                x_ext  = get_priv_obs_sim2sim(m, d, rma_teacher_dr_params, joint_perm)[16:]
+                xt_np  = np.concatenate([rma_teacher_x_int, x_ext])
+                xt_t   = torch.from_numpy(xt_np).unsqueeze(0).to(device)
+                z_true = policy.env_encoder(xt_t)
+                action_t = policy.act_inference(obs_t, z_override=z_true)
             else:
                 obs_t    = torch.from_numpy(obs_np).unsqueeze(0).to(device)
                 action_t = policy(obs_t)
@@ -964,7 +1081,7 @@ def run_episode(m, d, policy, method, device, dr: EpisodeDR,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--method",       type=str, required=True,
-                        choices=["baseline", "rma", "cts"])
+                        choices=["baseline", "rma", "rma_teacher", "cts"])
     parser.add_argument("--checkpoint",   type=str, required=True)
     parser.add_argument("--scene_xml",    type=str, default=None)
     parser.add_argument("--dr_scale",     type=float, default=1.0,
@@ -1076,6 +1193,12 @@ def main():
                 if args.method == "cts" and hist_len is not None:
                     obs_hist = torch.zeros(1, hist_len, 37, device=device)
 
+                rma_teacher_dr_params_r = params if not args.no_dr else {}
+                rma_teacher_x_int_r = None
+                if args.method == "rma_teacher":
+                    _pf = get_priv_obs_sim2sim(m, d, rma_teacher_dr_params_r, joint_perm)
+                    rma_teacher_x_int_r = _pf[:16]
+
                 _reset_pose(m, d, spawn_h, randomize=args.random_init, vel_cmd=vel_cmd)
                 # CTS: keep history at zeros (matches training reset behaviour).
 
@@ -1099,6 +1222,13 @@ def main():
                         elif args.method == "rma":
                             obs_t    = torch.from_numpy(obs_np).unsqueeze(0).to(device)
                             action_t = policy.act_inference(obs_t)
+                        elif args.method == "rma_teacher":
+                            obs_t  = torch.from_numpy(obs_np).unsqueeze(0).to(device)
+                            x_ext  = get_priv_obs_sim2sim(m, d, rma_teacher_dr_params_r, joint_perm)[16:]
+                            xt_np  = np.concatenate([rma_teacher_x_int_r, x_ext])
+                            xt_t   = torch.from_numpy(xt_np).unsqueeze(0).to(device)
+                            z_true = policy.env_encoder(xt_t)
+                            action_t = policy.act_inference(obs_t, z_override=z_true)
                         else:
                             obs_t    = torch.from_numpy(obs_np).unsqueeze(0).to(device)
                             action_t = policy(obs_t)

@@ -130,10 +130,12 @@ def _stride_var(events, cmd_dir) -> float:
 
 # ── Inference helper (handles all three methods) ─────────────────────────────
 
-def _policy_step(method, policy, obs_np, obs_hist, history_len, device):
-    """Run one inference step. Returns (action_np, obs_hist).
+def _policy_step(method, policy, obs_np, obs_hist, history_len, device,
+                 adapt_module=None, rma_hists=None):
+    """Run one inference step. Returns (action_np, obs_hist, rma_hists).
 
-    obs_hist is updated in place for CTS; passed through unchanged otherwise.
+    obs_hist   : CTS rolling obs buffer (or None).
+    rma_hists  : dict with 'state' and 'action' tensors for Phase-2 RMA (or None).
     """
     if method == "cts":
         obs_hist = torch.roll(obs_hist, -1, dims=1)
@@ -142,12 +144,25 @@ def _policy_step(method, policy, obs_np, obs_hist, history_len, device):
         policy_in = torch.cat([obs_hist.reshape(1, -1), flag], dim=1)
         action_t  = policy.act_inference(policy_in)
     elif method == "rma":
-        obs_t    = torch.from_numpy(obs_np).unsqueeze(0).to(device)
-        action_t = policy.act_inference(obs_t)
+        obs_t = torch.from_numpy(obs_np).unsqueeze(0).to(device)
+        if adapt_module is not None and rma_hists is not None:
+            sh = rma_hists["state"]
+            ah = rma_hists["action"]
+            # Compute z_hat from PAST history (before rolling in current obs),
+            # matching training order in rma_runner.py: z=φ(hist) → act → roll.
+            z_hat    = adapt_module(sh, ah)
+            action_t = policy.act_inference(obs_t, z_override=z_hat)
+            sh = torch.roll(sh, -1, dims=1)
+            sh[0, -1, :] = obs_t[0]
+            ah = torch.roll(ah, -1, dims=1)
+            ah[0, -1, :] = action_t[0].detach()
+            rma_hists = {"state": sh, "action": ah}
+        else:
+            action_t = policy.act_inference(obs_t)
     else:  # baseline
         obs_t    = torch.from_numpy(obs_np).unsqueeze(0).to(device)
         action_t = policy(obs_t)
-    return action_t.squeeze(0).cpu().numpy(), obs_hist
+    return action_t.squeeze(0).cpu().numpy(), obs_hist, rma_hists
 
 
 # ── Single-episode runner with metric collection ─────────────────────────────
@@ -156,7 +171,8 @@ def run_episode(m, d, policy, method, device,
                 joint_perm, inv_joint_perm,
                 vel_cmd, max_steps,
                 spawn_h, dr, foot_radius,
-                history_len, no_dr=False, random_init=False):
+                history_len, no_dr=False, random_init=False,
+                adapt_module=None):
     """Run one episode with full metric collection.
 
     Returns dict with: n_steps, survived, outcome, reward,
@@ -184,6 +200,14 @@ def run_episode(m, d, policy, method, device,
         # Keep history at zeros — matches training cts_env._reset_idx.
         obs_hist = torch.zeros(1, history_len, 37, device=device)
 
+    rma_hists = None
+    if method == "rma" and adapt_module is not None:
+        hl = adapt_module.history_len
+        rma_hists = {
+            "state":  torch.zeros(1, hl, 37, device=device),
+            "action": torch.zeros(1, hl, 12, device=device),
+        }
+
     rs = s2s.RewardState()
 
     # Per-step metric accumulators
@@ -207,8 +231,9 @@ def run_episode(m, d, policy, method, device,
     with torch.no_grad():
         while True:
             obs_np = s2s.get_obs(m, d, vel_cmd, joint_perm)
-            action_np, obs_hist = _policy_step(
+            action_np, obs_hist, rma_hists = _policy_step(
                 method, policy, obs_np, obs_hist, history_len, device,
+                adapt_module=adapt_module, rma_hists=rma_hists,
             )
             action_buf.appendleft(action_np.copy())
             delayed = action_buf[-1]
@@ -258,7 +283,7 @@ def run_episode(m, d, policy, method, device,
     spd = float(np.linalg.norm(cmd_dir))
     cmd_dir = cmd_dir / spd if spd > 1e-6 else np.array([1.0, 0.0])
 
-    survived = (done_reason == "timeout")
+    survived = (step >= int(T_SUCCESS_S / s2s.POLICY_DT))
 
     return {
         "n_steps":     step,
@@ -284,7 +309,7 @@ def run_episode(m, d, policy, method, device,
 def run_condition(m, d, policy, method, device,
                   joint_perm, inv_joint_perm, vel_cmd,
                   max_steps, spawn_h, dr, foot_radius,
-                  history_len, n_ep, label, seed):
+                  history_len, n_ep, label, seed, adapt_module=None):
     """Run n_ep episodes for one (method, dr_scale) condition."""
     np.random.seed(seed)
     print(f"\n  [{label}]  {n_ep} episodes × {max_steps} steps …", flush=True)
@@ -293,11 +318,12 @@ def run_condition(m, d, policy, method, device,
         r = run_episode(m, d, policy, method, device,
                         joint_perm, inv_joint_perm, vel_cmd,
                         max_steps, spawn_h, dr, foot_radius,
-                        history_len)
+                        history_len, adapt_module=adapt_module)
         results.append(r)
         sr  = sum(x["survived"] for x in results) / len(results) * 100
         rmu = float(np.mean([x["reward"] for x in results]))
-        print(f"    ep {ep+1:3d}/{n_ep}  survival={sr:.0f}%  "
+        print(f"    ep {ep+1:3d}/{n_ep}  steps={r['n_steps']:4d} "
+              f"reason={r['reason']:<14} survival={sr:.0f}%  "
               f"reward={rmu:+.1f}  rmse={results[-1]['vel_rmse']:.3f}", flush=True)
     return results
 
@@ -452,9 +478,11 @@ def main():
         description="Multi-condition sim2sim experiment for cts_rma_project")
 
     # Checkpoints (at least one required)
-    parser.add_argument("--baseline_ckpt", default=None)
-    parser.add_argument("--rma_ckpt",      default=None)
-    parser.add_argument("--cts_ckpt",      default=None)
+    parser.add_argument("--baseline_ckpt",  default=None)
+    parser.add_argument("--rma_ckpt",       default=None)
+    parser.add_argument("--cts_ckpt",       default=None)
+    parser.add_argument("--adapt_module",   default=None,
+                        help="RMA Phase-2 adaptation module checkpoint (.pt)")
     parser.add_argument("--scene_xml",     default=None)
     parser.add_argument("--latent_dim",    type=int, default=8)
     parser.add_argument("--history_len",   type=int, default=50)
@@ -514,11 +542,44 @@ def main():
     inv_joint_perm = np.argsort(joint_perm)
     foot_radius    = float(m.geom_size[s2s.FOOT_GEOM_IDS[0], 0])
     nominal_masses = m.body_mass.copy()
+
+    # Snapshot every model field that EpisodeDR mutates, taken now while `m`
+    # is still pristine. EpisodeDR.__init__ captures nominal_inertia / ipos /
+    # friction from the *current* m, so without restoring m to nominal before
+    # each condition the DR corruption compounds across baseline→rma→cts
+    # (COM offset adds, inertia scales multiply) and later methods get a
+    # catastrophically distorted robot. Restore from this snapshot before
+    # constructing each condition's EpisodeDR.
+    _nominal_model = {
+        "body_mass":        m.body_mass.copy(),
+        "body_inertia":     m.body_inertia.copy(),
+        "body_ipos":        m.body_ipos.copy(),
+        "geom_friction":    m.geom_friction.copy(),
+        "actuator_gainprm": m.actuator_gainprm.copy(),
+        "actuator_biasprm": m.actuator_biasprm.copy(),
+    }
+
+    def _restore_nominal_model():
+        m.body_mass[:]        = _nominal_model["body_mass"]
+        m.body_inertia[:]     = _nominal_model["body_inertia"]
+        m.body_ipos[:]        = _nominal_model["body_ipos"]
+        m.geom_friction[:]    = _nominal_model["geom_friction"]
+        m.actuator_gainprm[:] = _nominal_model["actuator_gainprm"]
+        m.actuator_biasprm[:] = _nominal_model["actuator_biasprm"]
+
     vel_cmd        = np.array([args.vel_x, args.vel_y, args.vel_yaw], dtype=np.float32)
     max_steps      = int(s2s.MAX_EPISODE_S / s2s.POLICY_DT)
     episode_length_s = max_steps * s2s.POLICY_DT
 
     print(f"Episode: {max_steps} steps × {s2s.POLICY_DT*1000:.0f} ms = {episode_length_s:.1f} s\n")
+
+    # ── Pre-load adaptation module for RMA Phase-2 (if provided) ─────────────
+    rma_adapt = None
+    if args.adapt_module and "rma" in methods:
+        rma_adapt = s2s.load_adapt_module(
+            args.adapt_module, latent_dim=args.latent_dim,
+            history_len=args.history_len, device=device,
+        )
 
     # ── Run all conditions ────────────────────────────────────────────────────
     cond_results = {}
@@ -528,11 +589,13 @@ def main():
             method, ckpt, device,
             latent_dim=args.latent_dim, history_len=args.history_len,
         )
+        adapt_module = rma_adapt if method == "rma" else None
 
         for dr_scale, dr_key, cond_n in [
             (args.dr_scale_train, "1x", 3),
             (args.dr_scale_ood,   "2x", 4),
         ]:
+            _restore_nominal_model()   # undo previous condition's DR drift
             dr = s2s.EpisodeDR(m, nominal_masses, dr_scale)
             label = f"Cond {cond_n} — {method.upper()} MuJoCo {dr_key.replace('x','×')}DR"
             cond_results[f"{method}_{dr_key}"] = run_condition(
@@ -543,6 +606,7 @@ def main():
                 n_ep=args.num_episodes,
                 label=label,
                 seed=args.seed,
+                adapt_module=adapt_module,
             )
             res = cond_results[f"{method}_{dr_key}"]
             sr  = sum(r["survived"] for r in res) / len(res) * 100

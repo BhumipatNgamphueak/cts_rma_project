@@ -34,9 +34,9 @@ parser.add_argument("--max_iterations", type=int,   default=15000)
 parser.add_argument("--latent_dim",     type=int,   default=8,
                     help="Encoder bottleneck z dimension (ablation: 8, 16, 32, 64, 128)")
 parser.add_argument("--priv_mode",      type=str,   default="FULL",
-                    choices=["FULL", "INT", "EXT"],
+                    choices=["FULL", "INT", "EXT", "TERR", "FULL_T"],
                     help="Privileged knowledge fed to the encoder mu(x_t): "
-                         "FULL=26D / INT=16D / EXT=10D")
+                         "FULL=26D / INT=16D / EXT=10D / TERR=77D / FULL_T=103D")
 parser.add_argument("--experiment",     type=str,   default="rma_teacher_go2")
 parser.add_argument("--seed",           type=int,   default=42)
 parser.add_argument("--checkpoint",     type=str,   default=None)

@@ -30,8 +30,8 @@ parser.add_argument("--lr",             type=float, default=5e-4)
 parser.add_argument("--latent_dim",     type=int,   default=8,
                     help="Must match the Phase 1 checkpoint latent_dim (8/16/32/64/128)")
 parser.add_argument("--priv_mode",      type=str,   default="FULL",
-                    choices=["FULL", "INT", "EXT"],
-                    help="Must match the Phase 1 checkpoint priv_mode (FULL/INT/EXT)")
+                    choices=["FULL", "INT", "EXT", "TERR", "FULL_T"],
+                    help="Must match the Phase 1 checkpoint priv_mode (FULL/INT/EXT/FULL_T)")
 parser.add_argument("--seed",           type=int,   default=42)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -61,11 +61,16 @@ def main():
     priv_dim  = PRIV_DIMS[priv_mode]
 
     # ── environment ─────────────────────────────────────────────────────
-    env_cfg = RMAEnvCfg()
+    env_cfg  = RMAEnvCfg()
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device     = device
     env_cfg.seed           = args_cli.seed
     env_cfg.priv_mode      = priv_mode
+    # Height scanner is only needed when x_t includes terrain heights.
+    # For FULL/INT/EXT modes, removing it avoids a silent warp-mesh init failure
+    # that leaves RayCaster.drift unset and crashes on the first env.reset().
+    if priv_mode not in ("TERR", "FULL_T"):
+        env_cfg.scene.height_scanner = None
 
     env = gym.make("Template-RMA-GO2-v0", cfg=env_cfg)
     env = RslRlVecEnvWrapper(env)

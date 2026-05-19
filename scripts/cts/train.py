@@ -38,9 +38,9 @@ parser.add_argument("--latent_dim",     type=int,   default=8,
                     choices=[8, 16, 32, 64, 128],
                     help="Encoder bottleneck Z (default 8)")
 parser.add_argument("--priv_mode",      type=str,   default="FULL",
-                    choices=["FULL", "INT", "EXT"],
+                    choices=["FULL", "INT", "EXT", "TERR", "FULL_T"],
                     help="Privileged knowledge fed to the teacher encoder / critic "
-                         "(FULL=26D internal+external, INT=16D internal, EXT=10D external)")
+                         "(FULL=26D, INT=16D, EXT=10D, TERR=77D terrain, FULL_T=103D)")
 parser.add_argument("--history_len",    type=int,   default=50,
                     help="Student obs history H in steps (default 50 = 1000ms at 50Hz)")
 parser.add_argument("--lambda_rec",     type=float, default=5.0,

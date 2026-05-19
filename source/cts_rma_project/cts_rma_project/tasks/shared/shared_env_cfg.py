@@ -22,6 +22,7 @@ from __future__ import annotations
 import math
 import isaaclab.sim as sim_utils
 import isaaclab.envs.mdp as mdp
+import isaaclab.terrains as terrain_gen
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import (
@@ -32,11 +33,29 @@ from isaaclab.managers import (
     TerminationTermCfg,
 )
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import ContactSensorCfg
+from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
+from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab_assets.robots.unitree import UNITREE_GO2_CFG  # type: ignore
 
 from . import mdp as shared_mdp
+
+
+# Flat plane only for now; add rougher sub-terrains later as needed
+COBBLESTONE_ROAD_CFG = terrain_gen.TerrainGeneratorCfg(
+    size=(8.0, 8.0),
+    border_width=20.0,
+    num_rows=10,
+    num_cols=20,
+    horizontal_scale=0.1,
+    vertical_scale=0.005,
+    slope_threshold=0.75,
+    difficulty_range=(0.0, 1.0),
+    use_cache=False,
+    sub_terrains={
+        "flat": terrain_gen.MeshPlaneTerrainCfg(proportion=1.0),
+    },
+)
 
 
 ###############################################################################
@@ -44,7 +63,20 @@ from . import mdp as shared_mdp
 ###############################################################################
 @configclass
 class SharedSceneCfg(InteractiveSceneCfg):
-    terrain = AssetBaseCfg(prim_path="/World/ground", spawn=sim_utils.GroundPlaneCfg())
+    terrain = TerrainImporterCfg(
+        prim_path="/World/ground",
+        terrain_type="generator",
+        terrain_generator=COBBLESTONE_ROAD_CFG,
+        max_init_terrain_level=1,
+        collision_group=-1,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+        ),
+        debug_vis=False,
+    )
     sky_light = AssetBaseCfg(
         prim_path="/World/skyLight",
         spawn=sim_utils.DomeLightCfg(intensity=750.0, color=(0.9, 0.9, 0.9)),
@@ -54,6 +86,15 @@ class SharedSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot/.*",
         history_length=3,
         track_air_time=True,
+    )
+    # 11×7 = 77 height samples over 1.0 m × 0.6 m grid, yaw-aligned
+    height_scanner = RayCasterCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/base",
+        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
+        attach_yaw_only=True,
+        pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[1.0, 0.6]),
+        debug_vis=False,
+        mesh_prim_paths=["/World/ground"],
     )
 
 
@@ -376,3 +417,5 @@ class SharedEnvCfg(ManagerBasedRLEnvCfg):
         self.decimation  = 4       # 50 Hz policy (matches OpenTopic)
         self.episode_length_s = 20.0
         self.action_space = 12
+        # Tick height scanner once per policy step
+        self.scene.height_scanner.update_period = self.decimation * self.sim.dt

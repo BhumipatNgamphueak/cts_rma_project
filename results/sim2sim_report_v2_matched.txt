@@ -1,0 +1,53 @@
+==============================================================================
+  Sim2Sim Evaluation Report — GO2 Locomotion (cts_rma_project)
+==============================================================================
+  Generated      : 2026-05-18 00:49
+  Episodes/cond  : 30
+  Episode length : 20.0 s
+  T_success      : 10 s
+  Vel command    : vx=+0.50 m/s  vy=+0.00  wz=+0.00
+  Methods        : BASELINE, RMA, CTS
+  Seed           : 42
+
+  4 TEST CONDITIONS:
+    Cond 1 — 1×DR in Isaac Lab   (reference, user-provided)
+    Cond 2 — 2×DR in Isaac Lab   (reference, user-provided)
+    Cond 3 — 1×DR in MuJoCo      (this script)
+    Cond 4 — 2×DR in MuJoCo      (this script)
+
+  Isaac Lab reference rewards (Conds 1 & 2):
+    BASELINE    1×DR=        —    2×DR=        —
+    RMA         1×DR=        —    2×DR=        —
+    CTS         1×DR=        —    2×DR=        —
+
+------------------------------------------------------------------------------
+  Per-condition summary (Cond 3 & 4 — MuJoCo episodes)
+------------------------------------------------------------------------------
+  Condition         Survival     Reward    StdR    vRMSE  GaitAdh  ClearErr    Slip   Smooth
+  ----------------------------------------------------------------------------
+  Baseline 1×DR         100%    +2349.6   239.9    0.222    0.316    0.0007   1.259    0.478
+  Baseline 2×DR          90%    +1742.9   800.5    0.351    0.265    0.0034   1.419    0.732
+  RMA      1×DR         100%    +2136.7    59.7    0.500    0.135    0.0000   1.145    0.001
+  RMA      2×DR         100%    +1826.7   584.6    0.500    0.136    0.0000   1.057    0.002
+  CTS      1×DR         100%    +1930.3   363.5    0.177    0.203    0.0013   1.971    1.361
+  CTS      2×DR          73%    +1108.9   989.8    0.327    0.208    0.0068   1.977    2.208
+
+------------------------------------------------------------------------------
+  Sim2Sim transfer gap  (MuJoCo reward − Isaac reward)
+------------------------------------------------------------------------------
+  Method             1×DR Δ         2×DR Δ     (negative = MuJoCo worse than Isaac)
+  ----------------------------------------------------------------------------
+  BASELINE                —              —
+  RMA                     —              —
+  CTS                     —              —
+
+------------------------------------------------------------------------------
+  OOD degradation in MuJoCo  (2×DR vs 1×DR, lower drop = more robust)
+------------------------------------------------------------------------------
+  Method        ΔReward    ΔSurvival     ΔvRMSE
+  ----------------------------------------------------------------------------
+  BASELINE       -606.7         -10%     +0.129
+  RMA            -310.1          +0%     +0.001
+  CTS            -821.4         -27%     +0.150
+
+==============================================================================

@@ -43,7 +43,7 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="GO2 OOD evaluation")
 parser.add_argument("--method",       type=str, required=True,
-                    choices=["baseline", "rma", "cts"])
+                    choices=["baseline", "rma", "rma_teacher", "cts"])
 parser.add_argument("--checkpoint",   type=str, required=True)
 parser.add_argument("--dr_scale",     type=float, default=2.0,
                     help="DR half-width multiplier (1.0=training range, 2.0=OOD×2)")
@@ -71,6 +71,15 @@ parser.add_argument("--save_raw_dir", type=str, default=None,
                     help="If set, also write per-episode JSON + per-step NPZ for this "
                          "(method,priv,latent,dr) under this directory. Enables "
                          "post-hoc analysis / bootstrapping / time-series plots.")
+parser.add_argument("--no_terrain",   action="store_true",
+                    help="Replace generated terrain with a flat ground plane "
+                         "and disable the height scanner.")
+parser.add_argument("--no_dist",      action="store_true",
+                    help="Disable push_robot and impulse disturbance events.")
+parser.add_argument("--no_impulse",   action="store_true",
+                    help="Disable ONLY impulse_reset/impulse_interval, keep "
+                         "push_robot. Matches v2 training (push_robot only; "
+                         "impulses were added after v2 was trained).")
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 sys.argv = [sys.argv[0]] + hydra_args
@@ -221,6 +230,22 @@ def _load_rma(ckpt: dict, device: str, latent_dim: int = 8,
     return policy, adapt_mod
 
 
+def _load_rma_teacher(ckpt: dict, device: str, latent_dim: int = 8, priv_dim: int = 26):
+    """Load RMAActorCritic in teacher mode (num_actor_obs=37+priv_dim → _teacher_mode=True).
+
+    At inference: z = env_encoder(obs[:,37:37+priv_dim]) — privileged info used directly.
+    This gives the Phase-1 upper-bound performance (oracle access to x_t).
+    """
+    from cts_rma_project.tasks.rma.rma_network import RMAActorCritic
+    sd = ckpt.get("model_state_dict", ckpt.get("actor_critic", ckpt))
+    policy = RMAActorCritic(
+        num_actor_obs=37 + priv_dim, num_critic_obs=37 + priv_dim, num_actions=12,
+        env_factor_dim=priv_dim, latent_dim=latent_dim,
+    ).to(device)
+    policy.load_state_dict(sd, strict=False)
+    return policy
+
+
 def _load_cts(ckpt: dict, device: str, latent_dim: int = 8, history_len: int = 50,
               priv_dim: int = 26):
     from cts_rma_project.tasks.cts.cts_network import CTSActorCritic
@@ -236,7 +261,10 @@ def _load_cts(ckpt: dict, device: str, latent_dim: int = 8, history_len: int = 5
 # ── Env factory ───────────────────────────────────────────────────────────────
 def _make_env(method: str, num_envs: int, dr_scale: float, device: str,
               history_len: int = 50, priv_mode: str = "FULL",
-              episode_length_s: float = 10.0) -> RslRlVecEnvWrapper:
+              episode_length_s: float = 10.0,
+              no_terrain: bool = False,
+              no_dist: bool = False,
+              no_impulse: bool = False) -> RslRlVecEnvWrapper:
     if method == "baseline":
         from cts_rma_project.tasks.baseline.baseline_env_cfg import BaselineEnvCfg
         cfg    = BaselineEnvCfg()
@@ -246,6 +274,15 @@ def _make_env(method: str, num_envs: int, dr_scale: float, device: str,
         cfg           = RMAEnvCfg()
         cfg.priv_mode = priv_mode
         gym_id        = "Template-RMA-GO2-v0"
+    elif method == "rma_teacher":
+        from cts_rma_project.tasks.rma.rma_env_cfg import RMATeacherEnvCfg
+        from cts_rma_project.tasks.shared.mdp import PRIV_DIMS
+        cfg           = RMATeacherEnvCfg()
+        cfg.priv_mode = priv_mode
+        priv_dim_t    = PRIV_DIMS[priv_mode]
+        cfg.observation_space = 37 + priv_dim_t
+        cfg.state_space       = 37 + priv_dim_t
+        gym_id        = "Template-RMA-Teacher-GO2-v0"
     else:  # cts
         from cts_rma_project.tasks.cts.cts_env_cfg import CTSEnvCfg
         cfg               = CTSEnvCfg()
@@ -257,9 +294,34 @@ def _make_env(method: str, num_envs: int, dr_scale: float, device: str,
 
     cfg.scene.num_envs    = num_envs
     cfg.sim.device        = device
-    cfg.episode_length_s  = episode_length_s   # spec-sheet T (default 10 s)
+    cfg.episode_length_s  = episode_length_s
     cfg.observations.policy.enable_corruption = False
     _apply_dr_scale(cfg, dr_scale)
+
+    if no_terrain:
+        from isaaclab.terrains import TerrainImporterCfg
+        cfg.scene.terrain = TerrainImporterCfg(
+            prim_path="/World/ground",
+            terrain_type="plane",
+            collision_group=-1,
+        )
+        cfg.scene.height_scanner = None
+        print("[eval] Terrain: FLAT ground plane (no generated terrain)")
+
+    if no_dist:
+        cfg.events.push_robot       = None
+        cfg.events.impulse_interval = None
+        cfg.events.impulse_reset    = None
+        print("[eval] Disturbances: DISABLED (push_robot, impulse_*)")
+
+    if no_impulse and not no_dist:
+        cfg.events.impulse_interval = None
+        cfg.events.impulse_reset    = None
+        print("[eval] Impulses DISABLED, push_robot KEPT (v2-training-faithful)")
+
+    # RMA Phase 2: disable height scanner for non-terrain priv modes
+    if method == "rma" and priv_mode not in ("TERR", "FULL_T"):
+        cfg.scene.height_scanner = None
 
     return RslRlVecEnvWrapper(gym.make(gym_id, cfg=cfg))
 
@@ -281,14 +343,18 @@ def main():
 
     ckpt      = torch.load(args_cli.checkpoint, map_location=device)
     ckpt_iter = ckpt.get("iter", "?")
+    terrain_tag = "flat"    if args_cli.no_terrain else "terrain"
+    dist_tag    = "no_dist" if args_cli.no_dist    else "dist"
     print(f"[eval] method={method}  ckpt_iter={ckpt_iter}  dr={dr_scale:.1f}x  "
-          f"priv={priv_mode}  latent={latent_dim}")
+          f"priv={priv_mode}  latent={latent_dim}  {terrain_tag}  {dist_tag}")
 
     adapt_mod = None
     if method == "baseline":
         policy = _load_baseline(ckpt, device)
     elif method == "rma":
         policy, adapt_mod = _load_rma(ckpt, device, latent_dim, args_cli.adapt_module, priv_dim)
+    elif method == "rma_teacher":
+        policy = _load_rma_teacher(ckpt, device, latent_dim, priv_dim)
     else:
         policy = _load_cts(ckpt, device, latent_dim, history_len, priv_dim)
     policy.eval()
@@ -301,7 +367,10 @@ def main():
         rma_action_hist = torch.zeros(num_envs, 50, 12, device=device)
 
     env       = _make_env(method, num_envs, dr_scale, device, history_len, priv_mode,
-                          episode_length_s=args_cli.episode_length_s)
+                          episode_length_s=args_cli.episode_length_s,
+                          no_terrain=args_cli.no_terrain,
+                          no_dist=args_cli.no_dist,
+                          no_impulse=args_cli.no_impulse)
     max_steps = int(env.unwrapped.max_episode_length)
     raw_env   = env.unwrapped
     robot     = raw_env.scene["robot"]
@@ -357,7 +426,11 @@ def main():
     print(f"[eval] collecting {num_eps} episodes ...")
     with torch.inference_mode():
         while len(ep_rewards) < num_eps and simulation_app.is_running():
-            if adapt_mod is not None:
+            if method == "rma_teacher":
+                xt      = obs[:, 37:37 + priv_dim]
+                z_true  = policy.env_encoder(xt)
+                actions = policy.act_inference(obs, z_override=z_true)
+            elif adapt_mod is not None:
                 z_hat   = adapt_mod(rma_state_hist, rma_action_hist)
                 actions = policy.act_inference(obs, z_override=z_hat)
             else:
@@ -577,7 +650,7 @@ def main():
             w = csv.writer(f)
             if new_file:
                 w.writerow(["sim", "method", "priv_mode", "latent_dim", "dr_scale",
-                            "episode_length_s",
+                            "terrain", "disturbance", "episode_length_s",
                             "mean_reward", "std_reward",
                             "mean_length", "std_length",
                             "success_rate", "partial_rate", "fall_rate", "survival_rate",
@@ -590,7 +663,7 @@ def main():
             lat_col = "N/A" if method == "baseline" else str(latent_dim)
             prv_col = "BASE" if method == "baseline" else priv_mode
             w.writerow(["isaac", method.upper(), prv_col, lat_col, f"{dr_scale:.1f}",
-                        f"{args_cli.episode_length_s:.1f}",
+                        terrain_tag, dist_tag, f"{args_cli.episode_length_s:.1f}",
                         f"{mean_rew:.4f}", f"{std_rew:.4f}",
                         f"{mean_len:.1f}", f"{std_len:.1f}",
                         f"{success:.1f}", f"{partial_rate:.1f}",
