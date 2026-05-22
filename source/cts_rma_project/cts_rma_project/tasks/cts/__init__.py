@@ -23,7 +23,6 @@ gym.register(
     },
 )
 
-# Legacy IDs for backward compatibility
 gym.register(
     id="Template-CTS-GO2-v0",
     entry_point="cts_rma_project.tasks.cts.cts_env:Go2CTSEnv",

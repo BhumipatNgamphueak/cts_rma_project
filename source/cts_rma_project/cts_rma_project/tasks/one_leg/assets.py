@@ -1,12 +1,14 @@
 # tasks/one_leg/assets.py
 """ArticulationCfg for the one-legged hopper on a linear rail."""
 from __future__ import annotations
+from pathlib import Path
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
 
-# Absolute path to the USD asset shipped alongside this project
-_USD_PATH = "/home/drl-68/t_s_policy/cts_rma_project/one_leggy8.usd"
+# Resolve path relative to project root (6 levels up from this file).
+# Place one_leggy8.usd at the repository root before running one-leg tasks.
+_USD_PATH = str(Path(__file__).parents[5] / "one_leggy8.usd")
 
 ONE_LEG_CFG = ArticulationCfg(
     prim_path="/World/envs/env_.*/Robot",

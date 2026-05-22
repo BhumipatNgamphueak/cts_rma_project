@@ -61,3 +61,12 @@ _build
 # Pre-Trained Checkpoints
 /.pretrained_checkpoints/
 *.csv
+
+# Claude Code settings (per-machine, not for VCS)
+.claude/
+
+# MuJoCo Menagerie — clone manually: git clone https://github.com/google-deepmind/mujoco_menagerie.git
+mujoco_menagerie/
+
+# Raw episode data (large binary, keep locally)
+results/raw/*.npz

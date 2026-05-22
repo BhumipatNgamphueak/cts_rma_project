@@ -1,118 +1,99 @@
-# Template for Isaac Lab Projects
+# Comparative Study: Baseline / RMA / CTS Locomotion on Unitree GO2
 
-## Overview
+FRA503 Deep Reinforcement Learning project comparing three locomotion policies for the Unitree GO2 quadruped in [Isaac Lab](https://isaac-sim.github.io/IsaacLab/).
 
-This project/repository serves as a template for building projects or extensions based on Isaac Lab.
-It allows you to develop in an isolated environment, outside of the core Isaac Lab repository.
+## Methods
 
-**Key Features:**
+| Method | Description |
+|--------|-------------|
+| **Baseline** | PPO with proprioceptive observations only (37D) |
+| **RMA** | Rapid Motor Adaptation — Phase 1 teacher encoder, Phase 2 adaptation module |
+| **CTS** | Concurrent Teacher-Student — 75/25 env split with online distillation |
 
-- `Isolation` Work outside the core Isaac Lab repository, ensuring that your development efforts remain self-contained.
-- `Flexibility` This template is set up to allow your code to be run as an extension in Omniverse.
-
-**Keywords:** extension, template, isaaclab
+All three share the same scene, reward, and domain randomisation config ([`shared_env_cfg.py`](source/cts_rma_project/cts_rma_project/tasks/shared/shared_env_cfg.py)).
 
 ## Installation
 
-- Install Isaac Lab by following the [installation guide](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html).
-  We recommend using the conda installation as it simplifies calling Python scripts from the terminal.
-
-- Clone or copy this project/repository separately from the Isaac Lab installation (i.e. outside the `IsaacLab` directory):
-
-- Using a python interpreter that has Isaac Lab installed, install the library in editable mode using:
-
-    ```bash
-    # use 'PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-    python -m pip install -e source/cts_rma_project
-
-- Verify that the extension is correctly installed by:
-
-    - Listing the available tasks:
-
-        Note: It the task name changes, it may be necessary to update the search pattern `"Template-"`
-        (in the `scripts/list_envs.py` file) so that it can be listed.
-
-        ```bash
-        # use 'FULL_PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-        python scripts/list_envs.py
-        ```
-
-    - Running a task:
-
-        ```bash
-        # use 'FULL_PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-        python scripts/<RL_LIBRARY>/train.py --task=<TASK_NAME>
-        ```
-
-### Set up IDE (Optional)
-
-To setup the IDE, please follow these instructions:
-
-- Run VSCode Tasks, by pressing `Ctrl+Shift+P`, selecting `Tasks: Run Task` and running the `setup_python_env` in the drop down menu.
-  When running this task, you will be prompted to add the absolute path to your Isaac Sim installation.
-
-If everything executes correctly, it should create a file .python.env in the `.vscode` directory.
-The file contains the python paths to all the extensions provided by Isaac Sim and Omniverse.
-This helps in indexing all the python modules for intelligent suggestions while writing code.
-
-### Setup as Omniverse Extension (Optional)
-
-We provide an example UI extension that will load upon enabling your extension defined in `source/cts_rma_project/cts_rma_project/ui_extension_example.py`.
-
-To enable your extension, follow these steps:
-
-1. **Add the search path of this project/repository** to the extension manager:
-    - Navigate to the extension manager using `Window` -> `Extensions`.
-    - Click on the **Hamburger Icon**, then go to `Settings`.
-    - In the `Extension Search Paths`, enter the absolute path to the `source` directory of this project/repository.
-    - If not already present, in the `Extension Search Paths`, enter the path that leads to Isaac Lab's extension directory directory (`IsaacLab/source`)
-    - Click on the **Hamburger Icon**, then click `Refresh`.
-
-2. **Search and enable your extension**:
-    - Find your extension under the `Third Party` category.
-    - Toggle it to enable your extension.
-
-## Code formatting
-
-We have a pre-commit template to automatically format your code.
-To install pre-commit:
-
 ```bash
-pip install pre-commit
+# 1. Install Isaac Lab (tested with IsaacLab v2.x)
+#    https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html
+
+# 2. Clone this repository
+git clone <repo-url>
+cd cts_rma_project
+
+# 3. Install the package in editable mode
+/path/to/IsaacLab/isaaclab.sh -p -m pip install -e source/cts_rma_project
+
+# 4. Clone MuJoCo Menagerie for sim-to-sim evaluation
+git clone https://github.com/google-deepmind/mujoco_menagerie.git
 ```
 
-Then you can run pre-commit with:
+## Training
 
+### Baseline
 ```bash
-pre-commit run --all-files
+/path/to/isaaclab.sh -p scripts/baseline/train.py --num_envs 4096 --max_iterations 5000
 ```
 
-## Troubleshooting
-
-### Pylance Missing Indexing of Extensions
-
-In some VsCode versions, the indexing of part of the extensions is missing.
-In this case, add the path to your extension in `.vscode/settings.json` under the key `"python.analysis.extraPaths"`.
-
-```json
-{
-    "python.analysis.extraPaths": [
-        "<path-to-ext-repo>/source/cts_rma_project"
-    ]
-}
+### RMA — Phase 1 (teacher)
+```bash
+/path/to/isaaclab.sh -p scripts/rma/train_phase1.py \
+    --num_envs 4096 --max_iterations 5000 \
+    --priv_mode FULL --latent_dim 8 --experiment rma_full_l8
 ```
 
-### Pylance Crash
-
-If you encounter a crash in `pylance`, it is probable that too many files are indexed and you run out of memory.
-A possible solution is to exclude some of omniverse packages that are not used in your project.
-To do so, modify `.vscode/settings.json` and comment out packages under the key `"python.analysis.extraPaths"`
-Some examples of packages that can likely be excluded are:
-
-```json
-"<path-to-isaac-sim>/extscache/omni.anim.*"         // Animation packages
-"<path-to-isaac-sim>/extscache/omni.kit.*"          // Kit UI tools
-"<path-to-isaac-sim>/extscache/omni.graph.*"        // Graph UI tools
-"<path-to-isaac-sim>/extscache/omni.services.*"     // Services tools
-...
+### RMA — Phase 2 (adaptation module)
+```bash
+/path/to/isaaclab.sh -p scripts/rma/train_phase2.py \
+    --checkpoint logs/rma/<run>/model_final.pt \
+    --priv_mode FULL --latent_dim 8 --num_envs 4096
 ```
+
+### CTS
+```bash
+/path/to/isaaclab.sh -p scripts/cts/train.py \
+    --num_envs 4096 --max_iterations 5000 \
+    --priv_mode FULL --latent_dim 8 --experiment cts_full_l8
+```
+
+Use `--priv_mode INT` or `--priv_mode EXT` for the privileged-info ablation.
+
+## Evaluation
+
+### Isaac Lab OOD test
+```bash
+/path/to/isaaclab.sh -p scripts/eval_ood_go2.py \
+    --method baseline --checkpoint logs/baseline/<run>/model_final.pt \
+    --dr_scales 1.0 2.0 --num_envs 512 --results_file results/eval_go2.csv
+```
+
+### MuJoCo sim-to-sim
+```bash
+python scripts/sim2sim/sim2sim_go2.py \
+    --method baseline --checkpoint logs/baseline/<run>/model_final.pt \
+    --dr_scales 1.0 2.0 --results_file results/eval_go2.csv
+```
+
+## Repository layout
+
+```
+scripts/
+  baseline/      train + play scripts for Baseline
+  rma/           train_phase1, train_phase2, play for RMA
+  cts/           train + play scripts for CTS
+  sim2sim/       MuJoCo sim-to-sim evaluation
+  eval_ood_go2.py  Isaac Lab OOD evaluation (unified CSV output)
+  plot_results_go2.py  generate comparison figures from CSV
+
+source/cts_rma_project/cts_rma_project/tasks/
+  baseline/      env config + PPO runner
+  rma/           env config, network (RMAActorCritic), Phase 2 runner
+  cts/           env config, network (CTSActorCritic), runner
+  shared/        SharedEnvCfg, domain randomisation, reward / obs functions
+  one_leg/       one-legged hopper experiment (auxiliary)
+```
+
+## License
+
+BSD 3-Clause — see [LICENSE](LICENSE).

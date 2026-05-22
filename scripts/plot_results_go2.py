@@ -697,16 +697,16 @@ _GAIT_METRICS = [
 
 def fig_gait_quality(ood: pd.DataFrame, sim: pd.DataFrame):
     """2×4 grid of bar charts comparing the 8 gait metrics across methods.
-    Uses the headline (FULL, smallest s) row per (sim, method)."""
+    Shows both DR×1 and DR×2 for Isaac and MuJoCo (4 bars per method group).
+    Encoding: colour = method, hatch = simulator, alpha = DR scale."""
     rows = []
     for df, src_label in [(ood, "Isaac"), (sim, "MuJoCo")]:
         if df.empty or not all(c in df.columns for c, _, _ in _GAIT_METRICS):
             continue
         hl = _headline(df)
-        s_min = hl["dr_scale"].min()
-        sub = hl[hl["dr_scale"] == s_min]
-        for _, r in sub.iterrows():
-            entry = {"method": r["method"], "sim": src_label, "s": s_min}
+        for _, r in hl.iterrows():
+            entry = {"method": r["method"], "sim": src_label,
+                     "dr": float(r["dr_scale"])}
             for col, _, _ in _GAIT_METRICS:
                 entry[col] = float(r[col]) if pd.notna(r.get(col)) else np.nan
             rows.append(entry)
@@ -719,51 +719,56 @@ def fig_gait_quality(ood: pd.DataFrame, sim: pd.DataFrame):
         print("[plot] skip fig_go2_gait_quality — no recognised methods")
         return
     sims_present = [s for s in ("Isaac", "MuJoCo") if s in set(data["sim"])]
+    dr_scales    = sorted(data["dr"].unique())
 
-    fig, axes = plt.subplots(2, 4, figsize=(11.0, 5.0))
-    # Sim encoding (consistent with all other figures):
-    #   colour  = METHOD (Baseline blue / RMA green / CTS red)
-    #   Isaac   = solid, alpha 1.00
-    #   MuJoCo  = hatched "//", alpha 0.70
-    sim_style = {"Isaac": dict(hatch="", alpha=1.00),
-                 "MuJoCo": dict(hatch="//", alpha=0.70)}
+    # 4 conditions per method: (Isaac DR×1, Isaac DR×2, MuJoCo DR×1, MuJoCo DR×2)
+    conditions = [(s, dr) for s in sims_present for dr in dr_scales]
+    sim_hatch  = {"Isaac": "",   "MuJoCo": "//"}
+    dr_alpha   = {1.0: 1.00,    2.0: 0.50}
+    dr_edge    = {1.0: "white", 2.0: "black"}
+    dr_lw      = {1.0: 0.4,     2.0: 0.8}
+
+    fig, axes = plt.subplots(2, 4, figsize=(14.0, 5.5))
     for k, (col, title, direction) in enumerate(_GAIT_METRICS):
         ax = axes[k // 4, k % 4]
         x = np.arange(len(methods_present))
-        w = 0.8 / max(1, len(sims_present))
-        for j, simlabel in enumerate(sims_present):
-            offset = (j - (len(sims_present) - 1) / 2) * w
+        w = 0.80 / max(1, len(conditions))
+        for j, (simlabel, dr) in enumerate(conditions):
+            offset = (j - (len(conditions) - 1) / 2) * w
             for i, m in enumerate(methods_present):
-                sub = data[(data["method"] == m) & (data["sim"] == simlabel)]
+                sub = data[(data["method"] == m) & (data["sim"] == simlabel)
+                           & np.isclose(data["dr"], dr)]
                 v = float(sub[col].iloc[0]) if len(sub) and pd.notna(sub[col].iloc[0]) else np.nan
                 ax.bar(x[i] + offset, v, w,
                        color=METHOD_COLOR[m],
-                       hatch=sim_style[simlabel]["hatch"],
-                       alpha=sim_style[simlabel]["alpha"],
-                       edgecolor="white", linewidth=0.4)
-        # Use short two-line labels so "RMA Teacher" fits without truncation.
+                       hatch=sim_hatch[simlabel],
+                       alpha=dr_alpha[dr],
+                       edgecolor=dr_edge[dr],
+                       linewidth=dr_lw[dr])
         short = [METHOD_LABEL[m].replace("RMA Teacher", "RMA\nTeacher")
                                  .replace("RMA Student", "RMA\nStudent") for m in methods_present]
         ax.set_xticks(x); ax.set_xticklabels(short, fontsize=7)
         ax.set_title(f"{title}\n({direction})", fontsize=8)
         ax.tick_params(axis="y", labelsize=7)
 
-    # Figure-level legend BELOW the 2×4 grid — methods + simulator encoding.
     import matplotlib.patches as mpatches
     method_handles = [mpatches.Patch(color=METHOD_COLOR[m], label=METHOD_LABEL[m])
                       for m in methods_present]
     sim_handles = [
-        mpatches.Patch(facecolor="0.6", alpha=1.00, label="Isaac (solid)"),
-        mpatches.Patch(facecolor="0.6", alpha=0.70, hatch="//", label="MuJoCo (hatched)"),
+        mpatches.Patch(facecolor="0.6", alpha=1.00, hatch="",   label="Isaac"),
+        mpatches.Patch(facecolor="0.6", alpha=0.70, hatch="//", label="MuJoCo"),
     ]
-    fig.legend(handles=method_handles + sim_handles, loc="lower center",
-               bbox_to_anchor=(0.5, 0.01),
-               ncol=len(method_handles) + len(sim_handles),
-               frameon=False, fontsize=10)
-    fig.suptitle("Go2 — Gait-quality metrics  "
-                 "(headline: FULL / $Z$=8 / lowest DR scale)",
+    dr_handles = [
+        mpatches.Patch(facecolor="0.6", alpha=1.00, edgecolor="white", lw=0.4, label="DR×1"),
+        mpatches.Patch(facecolor="0.6", alpha=0.50, edgecolor="black", lw=0.8, label="DR×2"),
+    ]
+    fig.legend(handles=method_handles + sim_handles + dr_handles,
+               loc="lower center", bbox_to_anchor=(0.5, 0.00),
+               ncol=len(method_handles) + len(sim_handles) + len(dr_handles),
+               frameon=False, fontsize=9)
+    fig.suptitle("Go2 — Gait-quality metrics  (FULL / $Z$=8 / DR×1 and DR×2)",
                  fontsize=11, fontweight="bold")
-    fig.tight_layout(rect=[0, 0.07, 1, 0.94])
+    fig.tight_layout(rect=[0, 0.09, 1, 0.94])
     _save(fig, "fig_go2_gait_quality")
 
 

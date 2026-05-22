@@ -120,7 +120,7 @@ class RMAPhase2Runner:
                 x_t = next_x
 
             # === Supervised update ===
-            states  = torch.stack(collected_states,  dim=1).flatten(0, 1)   # [steps*N, H, 30]
+            states  = torch.stack(collected_states,  dim=1).flatten(0, 1)   # [steps*N, H, 37]
             actions = torch.stack(collected_actions, dim=1).flatten(0, 1)   # [steps*N, H, 12]
             z_truth = torch.cat(collected_z_true, dim=0)                    # [steps*N, 8]
 
