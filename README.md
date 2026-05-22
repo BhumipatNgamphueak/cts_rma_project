@@ -15,17 +15,21 @@ All three share the same scene, reward, and domain randomisation config ([`share
 ## Installation
 
 ```bash
-# 1. Install Isaac Lab (tested with IsaacLab v2.x)
+# 1. Install Isaac Lab (tested with IsaacLab v2.x) and create the conda env
 #    https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html
+#    The installer creates a conda env named env_isaaclab.
 
 # 2. Clone this repository
-git clone <repo-url>
+git clone https://github.com/BhumipatNgamphueak/cts_rma_project.git
 cd cts_rma_project
 
-# 3. Install the package in editable mode
+# 3. Activate the Isaac Lab conda env (required before all commands below)
+conda activate env_isaaclab
+
+# 4. Install the package in editable mode
 /path/to/IsaacLab/isaaclab.sh -p -m pip install -e source/cts_rma_project
 
-# 4. Clone MuJoCo Menagerie for sim-to-sim evaluation
+# 5. Clone MuJoCo Menagerie for sim-to-sim evaluation
 git clone https://github.com/google-deepmind/mujoco_menagerie.git
 ```
 
@@ -62,18 +66,39 @@ Use `--priv_mode INT` or `--priv_mode EXT` for the privileged-info ablation.
 ## Evaluation
 
 ### Isaac Lab OOD test
+Run once per DR scale. `<run>` is the timestamped folder under `logs/baseline/`.
 ```bash
 /path/to/isaaclab.sh -p scripts/eval_ood_go2.py \
     --method baseline --checkpoint logs/baseline/<run>/model_final.pt \
-    --dr_scales 1.0 2.0 --num_envs 512 --results_file results/eval_go2.csv
+    --dr_scale 1.0 --num_envs 512 --results_file results/eval_go2.csv
+
+/path/to/isaaclab.sh -p scripts/eval_ood_go2.py \
+    --method baseline --checkpoint logs/baseline/<run>/model_final.pt \
+    --dr_scale 2.0 --num_envs 512 --results_file results/eval_go2.csv
 ```
 
 ### MuJoCo sim-to-sim
+Does not require Isaac Lab — runs with plain Python in `env_isaaclab`.
 ```bash
 python scripts/sim2sim/sim2sim_go2.py \
     --method baseline --checkpoint logs/baseline/<run>/model_final.pt \
-    --dr_scales 1.0 2.0 --results_file results/eval_go2.csv
+    --dr_scale 1.0 --results_file results/eval_go2.csv
+
+python scripts/sim2sim/sim2sim_go2.py \
+    --method baseline --checkpoint logs/baseline/<run>/model_final.pt \
+    --dr_scale 2.0 --results_file results/eval_go2.csv
 ```
+
+## Plotting results
+
+After running evaluations, generate comparison figures and LaTeX tables from the CSV:
+```bash
+python scripts/plot_results_go2.py \
+    --ood results/ood_go2.csv \
+    --sim2sim results/sim2sim_go2.csv
+```
+
+Figures are written to `results/figures/`.
 
 ## Repository layout
 
