@@ -1,7 +1,72 @@
+# C++
+**/cmake-build*/
+**/build*/
+**/*.so
 
-*.pt
-*.pyc
+# Omniverse
+**/*.dmp
+**/.thumbs
+
+# No USD files in the repo
+**/*.usd
+**/*.usda
+**/*.usdc
+**/*.usdz
+
+# Python
+.DS_Store
+**/*.egg-info/
+**/__pycache__/
+**/.pytest_cache/
+**/*.pyc
+**/*.pb
+
+# Docker/Singularity
+**/*.sif
+docker/cluster/exports/
+docker/.container.cfg
+
+# IDE
+**/.idea/
+**/.vscode/
+!.vscode
+
+# Outputs
+**/output/*
+**/outputs/*
+**/videos/*
+**/wandb/*
+**/.neptune/*
+docker/artifacts/
+*.tmp
+
+# Doc Outputs
+**/docs/_build/*
+**/generated/*
+
+# Isaac-Sim packman
+_isaac_sim*
+_repo
+_build
+.lastformat
+
+# Logs and checkpoints
+**/*.log*
+**/logs/*
+**/runs/*
+**/recordings/*
+**/*.pt
+
+# Pre-Trained Checkpoints
+/.pretrained_checkpoints/
+
+# Result data files
 *.csv
-*.txt
-*.0
 *.npz
+results/raw/*.npz
+
+# Claude Code settings (per-machine, not for VCS)
+.claude/
+
+# MuJoCo Menagerie — clone manually: git clone https://github.com/google-deepmind/mujoco_menagerie.git
+mujoco_menagerie/
