@@ -1090,32 +1090,54 @@ def fig_rma_phase2_loss(lc_path: str | None = None):
     iters  = np.array(iters)
     losses = np.array(losses)
 
-    # Rolling mean (window=50)
+    # Separate iteration-0 pre-training point from the training curve
+    has_init = iters[0] == 0 and len(iters) > 1 and iters[1] > 1
+    if has_init:
+        init_iter, init_loss = iters[0], losses[0]
+        train_iters, train_losses = iters[1:], losses[1:]
+    else:
+        train_iters, train_losses = iters, losses
+        init_iter = init_loss = None
+
+    # Rolling mean over training curve only (window=50)
     win = 50
-    padded = np.pad(losses, (win // 2, win - 1 - win // 2), mode="edge")
+    padded = np.pad(train_losses, (win // 2, win - 1 - win // 2), mode="edge")
     roll   = np.convolve(padded, np.ones(win) / win, mode="valid")
 
-    # Reference: teacher has MSE = 0 by definition; we annotate the plateau
-    plateau_mean = float(np.mean(losses[-100:]))
+    plateau_mean = float(np.mean(train_losses[-100:]))
     first_loss   = float(losses[0])
 
     fig, ax = plt.subplots(figsize=(8, 4))
 
-    # Raw curve (faded)
-    ax.plot(iters, losses, color="#aaaaaa", lw=0.6, alpha=0.55, label="Per-iteration MSE")
+    # Raw training curve (faded)
+    ax.plot(train_iters, train_losses, color="#aaaaaa", lw=0.6, alpha=0.55,
+            label="Per-iteration MSE")
     # Rolling mean
-    ax.plot(iters, roll, color=METHOD_COLOR["RMA"], lw=2.0, label=f"Rolling mean (w={win})")
+    ax.plot(train_iters, roll, color=METHOD_COLOR["RMA"], lw=2.0,
+            label=f"Rolling mean (w={win})")
+
+    # Pre-training initial point
+    if has_init:
+        ax.axvline(train_iters[0], color="#888888", lw=1.0, ls=":", alpha=0.6)
+        ax.scatter([init_iter], [init_loss], color="black", zorder=5, s=40,
+                   label=f"Pre-training loss = {init_loss:.3f}")
+        ax.annotate(f"warmup ends →\ntraining starts",
+                    xy=(train_iters[0], init_loss),
+                    xytext=(train_iters[0] + len(train_iters) * 0.05, init_loss * 1.04),
+                    fontsize=8, color="#555555",
+                    arrowprops=dict(arrowstyle="->", color="#888888", lw=0.8))
 
     # Horizontal reference lines
-    ax.axhline(0.0, color="black", lw=1.0, ls="--", alpha=0.5, label="Teacher (oracle, MSE = 0)")
+    ax.axhline(0.0, color="black", lw=1.0, ls="--", alpha=0.5,
+               label="Teacher (oracle, MSE = 0)")
     ax.axhline(plateau_mean, color="#d6604d", lw=1.2, ls=":",
                label=f"Student plateau ≈ {plateau_mean:.3f}")
 
-    # Gap annotation with a double-headed arrow
-    mid_iter = iters[len(iters) // 2]
+    # Gap annotation
+    mid_iter = train_iters[len(train_iters) // 2]
     ax.annotate("", xy=(mid_iter, 0), xytext=(mid_iter, plateau_mean),
                 arrowprops=dict(arrowstyle="<->", color="#762a83", lw=1.8))
-    ax.text(mid_iter + len(iters) * 0.01, plateau_mean / 2,
+    ax.text(mid_iter + len(train_iters) * 0.01, plateau_mean / 2,
             f"Gap ≈ {plateau_mean:.3f}", va="center", color="#762a83", fontsize=9)
 
     ax.set_xlabel("Phase-2 Iteration")
@@ -1427,7 +1449,12 @@ def fig_comparison_outcome(ood, sim):
     dr_lo, dr_hi = dr_scales[0], dr_scales[-1]
 
     def _v(df, m, s, col):
-        sub = df[(df["method"] == m) & (np.isclose(df["dr_scale"], s))]
+        # Headline priv_mode per method: Baseline = BASE, RMA/CTS = FULL.
+        # Without this filter the alphabetical first row (EXT) leaks into the
+        # CTS bars and the "CTS" column silently shows the EXT-ablation result.
+        priv = "BASE" if m == "BASELINE" else "FULL"
+        sub = df[(df["method"] == m) & (np.isclose(df["dr_scale"], s))
+                 & (df["priv_mode"] == priv)]
         if not len(sub) or pd.isna(sub[col].iloc[0]): return 0.0
         return float(sub[col].iloc[0])
 
@@ -1843,6 +1870,7 @@ def write_cts_priv_ablation_table(ood: pd.DataFrame, sim: pd.DataFrame):
             "reward":   float(r["mean_reward"]) if pd.notna(r.get("mean_reward")) else np.nan,
             "rew_std":  float(r["std_reward"])  if pd.notna(r.get("std_reward"))  else np.nan,
             "success":  float(r["success_rate"]) if pd.notna(r.get("success_rate")) else np.nan,
+            "survival": float(r["survival_rate"]) if pd.notna(r.get("survival_rate")) else np.nan,
             "rmse":     float(r["mean_track_err"]) if pd.notna(r.get("mean_track_err")) else np.nan,
         }
 
@@ -1861,7 +1889,8 @@ def write_cts_priv_ablation_table(ood: pd.DataFrame, sim: pd.DataFrame):
                 cells.append({
                     "sim": sim_label, "DR×s": f"{dr:g}", "priv": priv,
                     "reward":  r["reward"], "rew_std": r["rew_std"],
-                    "success": r["success"], "rmse": r["rmse"],
+                    "success": r["success"], "survival": r["survival"],
+                    "rmse": r["rmse"],
                     "delta_r": delta_r,
                 })
 
@@ -1871,18 +1900,19 @@ def write_cts_priv_ablation_table(ood: pd.DataFrame, sim: pd.DataFrame):
         f.write("_Auto-generated by scripts/plot_results_go2.py from "
                 "`results/ood_go2.csv` + `results/sim2sim_go2.csv`._\n\n")
         f.write("## Per-cell results (CTS only)\n\n")
-        f.write("| sim | DR×s | priv | reward (mean ± std) | success % | "
+        f.write("| sim | DR×s | priv | reward (mean ± std) | success % | survival % | "
                 "vel-RMSE [m/s] | Δreward vs FULL |\n")
-        f.write("|---|---|---|---|---:|---:|---:|\n")
+        f.write("|---|---|---|---|---:|---:|---:|---:|\n")
         for c in cells:
             rew = (f"{c['reward']:.1f} ± {c['rew_std']:.1f}"
                    if not np.isnan(c['reward']) else "—")
             succ = f"{c['success']:.0f}"   if not np.isnan(c['success']) else "—"
+            surv = f"{c['survival']:.0f}"  if not np.isnan(c['survival']) else "—"
             rmse = f"{c['rmse']:.3f}"      if not np.isnan(c['rmse'])    else "—"
             dr_  = (f"{c['delta_r']:+.1f} %"
                     if not np.isnan(c['delta_r']) else "—")
             f.write(f"| {c['sim']} | {c['DR×s']} | {c['priv']} | "
-                    f"{rew} | {succ} | {rmse} | {dr_} |\n")
+                    f"{rew} | {succ} | {surv} | {rmse} | {dr_} |\n")
 
         # Behaviour (gait-quality) metrics per (sim × DR × priv)
         if all(c in df.columns for c, _, _ in _GAIT_METRICS):

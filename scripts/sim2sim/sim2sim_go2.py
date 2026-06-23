@@ -1106,8 +1106,14 @@ def main():
     parser.add_argument("--latent_dim",   type=int, default=8)
     parser.add_argument("--history_len",  type=int, default=50)
     parser.add_argument("--render",       action="store_true")
+    parser.add_argument("--save_video",   action="store_true",
+                        help="Record each episode to an MP4 (headless EGL rendering)")
+    parser.add_argument("--video_dir",    type=str, default="results/videos",
+                        help="Directory to write MP4 clips")
+    parser.add_argument("--video_width",  type=int, default=1280)
+    parser.add_argument("--video_height", type=int, default=720)
     parser.add_argument("--no_terminate", action="store_true",
-                        help="Disable termination (viewer only)")
+                        help="Disable termination (viewer or video mode)")
     parser.add_argument("--vel_x",        type=float, default=0.5)
     parser.add_argument("--seed",         type=int, default=42)
     parser.add_argument("--device",       type=str, default="cuda")
@@ -1117,8 +1123,8 @@ def main():
                              "(same schema as scripts/eval_ood_go2.py).")
     args = parser.parse_args()
 
-    if args.no_terminate and not args.render:
-        parser.error("--no_terminate requires --render")
+    if args.no_terminate and not (args.render or args.save_video):
+        parser.error("--no_terminate requires --render or --save_video")
     if args.no_terminate:
         args.num_episodes = 1
 
@@ -1273,6 +1279,117 @@ def main():
                 print(f"  ep {ep+1:3d}  steps={step:5d}  reward={total_r:8.1f}  "
                       f"lin_track={ep_lin_track[-1]:.3f}  ang_track={ep_ang_track[-1]:.3f}  "
                       f"err={ep_track_err[-1]:.3f} m/s  {reason}")
+
+    elif args.save_video:
+        import os as _os
+        _os.environ.setdefault("MUJOCO_GL", "egl")
+        import imageio.v2 as _iio
+
+        os.makedirs(args.video_dir, exist_ok=True)
+        renderer = mujoco.Renderer(m, height=args.video_height, width=args.video_width)
+        cam = mujoco.MjvCamera()
+        cam.type      = mujoco.mjtCamera.mjCAMERA_FREE
+        cam.distance  = 2.8
+        cam.elevation = -18
+        cam.azimuth   = 135
+        POLICY_HZ = int(round(1.0 / POLICY_DT))
+
+        for ep in range(args.num_episodes):
+            if args.no_dr:
+                dr.reset_to_nominal()
+                delay_steps = 1
+            else:
+                params = dr.sample()
+                dr.apply(params)
+                delay_steps = max(1, round(params["delay_ms"] / (POLICY_DT * 1000)))
+            mujoco.mj_forward(m, d)
+
+            null_action = np.zeros(12, dtype=np.float32)
+            action_buf  = collections.deque([null_action.copy()] * (delay_steps + 1),
+                                             maxlen=delay_steps + 1)
+            obs_hist = None
+            if args.method == "cts" and hist_len is not None:
+                obs_hist = torch.zeros(1, hist_len, 37, device=device)
+            rma_state_hist  = torch.zeros(1, args.history_len, 37, device=device)
+            rma_action_hist = torch.zeros(1, args.history_len, 12, device=device)
+
+            _reset_pose(m, d, spawn_h, randomize=args.random_init, vel_cmd=vel_cmd)
+            rs = RewardState()
+            total_r, step = 0.0, 0
+            sum_lt, sum_at, sum_te = 0.0, 0.0, 0.0
+            done, reason = False, "running"
+            frames = []
+
+            with torch.no_grad():
+                while not done:
+                    obs_np = get_obs(m, d, vel_cmd, joint_perm)
+
+                    if args.method == "cts":
+                        obs_hist = torch.roll(obs_hist, -1, dims=1)
+                        obs_hist[0, -1, :] = torch.from_numpy(obs_np).to(device)
+                        flag      = torch.zeros(1, 1, device=device)
+                        policy_in = torch.cat([obs_hist.reshape(1, -1), flag], dim=1)
+                        action_t  = policy.act_inference(policy_in)
+                    elif args.method == "rma":
+                        obs_t = torch.from_numpy(obs_np).unsqueeze(0).to(device)
+                        adapt_module = getattr(policy, "_adapt_module", None)
+                        if adapt_module is not None:
+                            rma_state_hist  = torch.roll(rma_state_hist,  -1, dims=1)
+                            rma_action_hist = torch.roll(rma_action_hist, -1, dims=1)
+                            rma_state_hist[0, -1, :]  = obs_t[0]
+                            z_hat    = adapt_module(rma_state_hist, rma_action_hist)
+                            action_t = policy.act_inference(obs_t, z_override=z_hat)
+                            rma_action_hist[0, -1, :] = action_t[0].detach()
+                        else:
+                            action_t = policy.act_inference(obs_t)
+                    else:
+                        obs_t    = torch.from_numpy(obs_np).unsqueeze(0).to(device)
+                        action_t = policy(obs_t)
+
+                    action_np = action_t.squeeze(0).cpu().numpy()
+                    action_buf.appendleft(action_np.copy())
+                    d.ctrl[:] = compute_target_q(action_buf[-1], inv_joint_perm)
+                    for _ in range(DECIMATION):
+                        mujoco.mj_step(m, d)
+
+                    # camera tracks robot base
+                    cam.lookat[:] = d.qpos[:3]
+                    renderer.update_scene(d, camera=cam)
+                    frames.append(renderer.render().copy())
+
+                    tau = d.actuator_force.copy()
+                    total_r += compute_step_reward(m, d, vel_cmd, action_np, tau, rs)
+                    lt, at, te = compute_tracking_step(d, vel_cmd)
+                    sum_lt += lt; sum_at += at; sum_te += te
+                    step   += 1
+
+                    if args.no_terminate:
+                        done, reason = False, "running"
+                        if step >= max_steps:
+                            done, reason = True, "timeout"
+                    else:
+                        done, reason = is_done(m, d, step, max_steps)
+
+            # save video
+            tag = f"{args.method}_{args.priv_mode}_dr{args.dr_scale:.1f}_ep{ep+1:02d}"
+            vid_path = os.path.join(args.video_dir, f"{tag}.mp4")
+            _iio.mimwrite(vid_path, frames, fps=POLICY_HZ)
+            ep_rewards.append(total_r)
+            ep_lengths.append(step)
+            ep_reasons.append(reason)
+            steps_safe = max(step, 1)
+            ep_lin_track.append(sum_lt / steps_safe)
+            ep_ang_track.append(sum_at / steps_safe)
+            ep_track_err.append(sum_te / steps_safe)
+            ep_fwd_disp.append(d.qpos[0])
+            ep_gait.append({k: 0.0 for k in ["gait_adh","clear_err","slip_rate",
+                                               "smoothness","base_z_var","contact_sym",
+                                               "stride_var","jtorque_var"]})
+            ep_outcomes.append("success" if reason == "timeout" else "fail")
+            print(f"  ep {ep+1:3d}  steps={step:5d}  reward={total_r:8.1f}  "
+                  f"[{reason}]  → {vid_path}")
+
+        renderer.close()
 
     else:
         for ep in range(args.num_episodes):

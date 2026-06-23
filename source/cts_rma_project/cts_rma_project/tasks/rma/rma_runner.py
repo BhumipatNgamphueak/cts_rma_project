@@ -83,20 +83,43 @@ class RMAPhase2Runner:
         csv_writer = csv.writer(csv_file)
         csv_writer.writerow(["iteration", "mse_loss"])
 
+        steps_per_iter = self.batch_size // self.env.num_envs
+
+        # One-time env reset + history warmup. φ sees a `history_len`-step buffer
+        # of (obs, action). With batch_size/num_envs (e.g. 80000/4096 ≈ 19) <
+        # history_len (50), if we reset envs every iteration and only collect 19
+        # fresh steps, every training sample has ≥ 31 zero-padded entries.
+        # φ then learns the trivial constant ẑ ≈ E[z]. Fix: reset once, prime
+        # the buffer with `history_len` no-collect steps, and let the env run
+        # continuously across iterations so non-terminating envs accumulate
+        # full histories (matching the deployment distribution).
+        obs_dict, _  = self.env.reset()
+        x_t          = obs_dict["policy"].to(self.device)
+        # critic group: [ot(37), xt(priv_dim)] — extract xt for teacher encoder
+        xt           = obs_dict["critic"].to(self.device)[:, 37:37 + self.priv_dim]
+
+        print(f"[Phase 2] Warming up history buffer ({self.history_len} steps)...")
+        for _ in range(self.history_len):
+            with torch.inference_mode():
+                z_hat  = self.adapt_module(self.state_hist, self.action_hist)
+                action = self.rma.policy(x_t, z_hat)
+            obs_dict_next, _, terminated, truncated, _ = self.env.step(action)
+            dones  = terminated | truncated
+            next_x = obs_dict_next["policy"].to(self.device)
+            xt     = obs_dict_next["critic"].to(self.device)[:, 37:37 + self.priv_dim]
+            self._roll_history(x_t, action)
+            if dones.any():
+                self.state_hist[dones]  = 0.0
+                self.action_hist[dones] = 0.0
+            x_t = next_x
+
         for iteration in range(self.num_iters):
             # === Collect on-policy data using current ẑ ===
             collected_states  = []
             collected_actions = []
             collected_z_true  = []
 
-            obs_dict, _  = self.env.reset()
-            x_t          = obs_dict["policy"].to(self.device)
-            # critic group: [ot(37), xt(priv_dim)] — extract xt for teacher encoder
-            xt           = obs_dict["critic"].to(self.device)[:, 37:37 + self.priv_dim]
-
-            steps_per_iter = self.batch_size // self.env.num_envs
-
-            for step in range(steps_per_iter):
+            for _ in range(steps_per_iter):
                 with torch.inference_mode():
                     z_hat  = self.adapt_module(self.state_hist, self.action_hist)
                     action = self.rma.policy(x_t, z_hat)   # BasePolicy: (ot, z) → a
@@ -135,6 +158,18 @@ class RMAPhase2Runner:
                     print(f"[Phase 2] z-stats set after {self.stat_warmup} iters | "
                           f"|mean|={self.adapt_module.z_mean.norm():.2f} "
                           f"|std|={self.adapt_module.z_std.norm():.2f}")
+                    # Log pre-training loss (untrained φ) as iteration 0
+                    z_tgt_init = (z_truth - self.adapt_module.z_mean) / self.adapt_module.z_std
+                    idx0   = torch.randperm(states.shape[0], device=self.device)
+                    mb0    = states.shape[0] // 4
+                    init_losses = []
+                    with torch.no_grad():
+                        for i in range(4):
+                            mb_idx = idx0[i*mb0:(i+1)*mb0]
+                            z_pred = self.adapt_module.core(states[mb_idx], actions[mb_idx])
+                            init_losses.append(self.loss_fn(z_pred, z_tgt_init[mb_idx]).item())
+                    csv_writer.writerow([0, f"{sum(init_losses)/len(init_losses):.6f}"])
+                    csv_file.flush()
                 continue
 
             # Standardised regression target (de-normalised at deployment)
